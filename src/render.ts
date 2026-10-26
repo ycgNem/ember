@@ -50,7 +50,7 @@ function drawSparks() {
     const grow = clamp((G.clock - s.born) * 3, 0, 1);
     const bob = s.vy ? 0 : Math.sin(G.clock * 3 + s.phase);
     if (s.kind === 'mote') {
-      const fade = clamp((6 - (G.clock - s.born)) / 1.5, 0, 1);
+      const fade = clamp((6 - s.age) / 1.5, 0, 1);
       glow(s.x, s.y + bob * 2, 11 * grow, 350, 65, 0.9 * fade);
       glow(s.x, s.y + bob * 2, 4 * grow, 0, 90, fade);
       continue;

@@ -21,6 +21,15 @@ export function segmentIntersect(a: Pt, b: Pt, c: Pt, d: Pt): Pt | null {
   return { x: a.x + t * rx, y: a.y + t * ry };
 }
 
+/** Distance from p to the segment a-b. */
+export function segmentDistance(p: Pt, a: Pt, b: Pt): number {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const len2 = dx * dx + dy * dy;
+  const t = len2 > 0 ? clamp(((p.x - a.x) * dx + (p.y - a.y) * dy) / len2, 0, 1) : 0;
+  return Math.hypot(p.x - (a.x + dx * t), p.y - (a.y + dy * t));
+}
+
 export function pointInPolygon(p: Pt, poly: readonly Pt[]): boolean {
   let inside = false;
   for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {

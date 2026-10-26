@@ -6,7 +6,8 @@ export type MutationId =
   | 'lasso' | 'orbitals' | 'echo' | 'corona' | 'capacitor' | 'magnet'
   | 'rebirth' | 'singularity' | 'prism' | 'predator' | 'phase'
   | 'binary' | 'overclock' | 'arc' | 'heart' | 'stasis' | 'bloom' | 'tail'
-  | 'flare' | 'constellation' | 'devourer';
+  | 'flashpoint' | 'reflect' | 'kindle'
+  | 'flare' | 'constellation' | 'devourer' | 'zero' | 'mirrors';
 
 export interface MutationDef {
   id: MutationId;
@@ -56,12 +57,22 @@ export const MUTATIONS: readonly MutationDef[] = [
     desc: (l) => l === 1 ? 'Every spark you eat bursts in a small shockwave' : 'Spark bursts grow larger' },
   { id: 'tail', name: 'Comet Tail', hue: 28, max: 2,
     desc: (l) => l === 1 ? 'Your fresh trail scorches any void it touches' : 'Your scorching trail lasts longer' },
+  { id: 'flashpoint', name: 'Flashpoint', hue: 15, max: 2,
+    desc: (l) => l === 1 ? 'Taking a hit erupts in a flare that blasts nearby voids away' : 'The flare reaches farther, and you stay untouchable longer' },
+  { id: 'reflect', name: 'Reflection', hue: 95, max: 2,
+    desc: (l) => l === 1 ? 'Your pulse turns enemy spit into homing shards' : 'Satellites and your twin turn spit into shards too' },
+  { id: 'kindle', name: 'Kindle', hue: 48, max: 2,
+    desc: (l) => l === 1 ? 'Your spark combo cools slower, and every 10th spark in a chain refunds half a charge' : 'Your combo cools slower still' },
   { id: 'flare', name: 'Solar Flare', hue: 40, max: 1, requires: { lasso: 1, corona: 2 },
     desc: () => 'Closing a loop also detonates a free pulse at its heart' },
   { id: 'constellation', name: 'Constellation', hue: 190, max: 1, requires: { orbitals: 3, prism: 1 },
     desc: () => 'Your satellites fire homing shards on their own' },
   { id: 'devourer', name: 'Devourer', hue: 285, max: 1, requires: { singularity: 1, predator: 1 },
     desc: () => 'Black holes last longer, and every 10 voids they eat restores an ember' },
+  { id: 'zero', name: 'Absolute Zero', hue: 200, max: 1, requires: { stasis: 1, corona: 1 },
+    desc: () => 'Your pulse shatters voids caught in your stasis field, shells and all' },
+  { id: 'mirrors', name: 'Hall of Mirrors', hue: 262, max: 1, requires: { echo: 1, binary: 1 },
+    desc: () => 'Your echoes pulse whenever you do' },
 ];
 
 export const MUTATION_BY_ID = Object.fromEntries(MUTATIONS.map((m) => [m.id, m])) as Record<MutationId, MutationDef>;
@@ -98,11 +109,13 @@ function meets(req: Partial<Record<MutationId, number>>, levels: Levels) {
   return Object.entries(req).every(([id, n]) => levels[id as MutationId] >= (n ?? 0));
 }
 
-export function rollOffer(levels: Levels, first: boolean, count = 3): MutationId[] {
+/** `spent` holds one-shot mutations already used up this run; they aren't offered again. */
+export function rollOffer(levels: Levels, first: boolean, count = 3, spent: ReadonlySet<MutationId> = new Set()): MutationId[] {
   const offer: MutationId[] = [];
-  const synergies = MUTATIONS.filter((m) => m.requires && levels[m.id] < m.max && meets(m.requires, levels));
+  const available = (m: MutationDef) => levels[m.id] < m.max && !spent.has(m.id);
+  const synergies = MUTATIONS.filter((m) => m.requires && available(m) && meets(m.requires, levels));
   if (synergies.length) offer.push(pick(synergies).id);
-  const open = MUTATIONS.filter((m) => !m.requires && levels[m.id] < m.max).map((m) => m.id);
+  const open = MUTATIONS.filter((m) => !m.requires && available(m)).map((m) => m.id);
   // the first evolution always offers the wake, it's the most fun one to discover
   if (first && open.includes('lasso')) offer.push('lasso');
   const rest = open.filter((id) => !offer.includes(id)).sort(() => Math.random() - 0.5);

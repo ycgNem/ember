@@ -4,13 +4,13 @@ import { GenePool, type Gene, type Genome } from './genome';
 import { up } from './meta';
 import { emptyLevels, tierFor, type Levels, type MutationId, type Rarity } from './mutations';
 import { SECTORS, type SectorDef } from './sectors';
-import type { Pt } from './util';
+import { segmentDistance, type Pt } from './util';
 
 export type GameState = 'title' | 'forge' | 'play' | 'evolve' | 'warp' | 'dead';
 export type RingKind = 'pulse' | 'bloom' | 'flare' | 'echo' | 'nova' | 'fever';
 export type BossMove = 'idle' | 'aim' | 'dash' | 'slam' | 'summon' | 'barrage' | 'vanish' | 'tether';
 export type SparkKind = 'spark' | 'mote' | 'gold';
-export type EventKind = 'starfall' | 'bloodmoon' | 'goldrush';
+export type EventKind = 'starfall' | 'bloodmoon' | 'goldrush' | 'eclipse' | 'storm';
 
 export const WARP_TIME = 3;
 
@@ -20,7 +20,8 @@ export interface Particle {
   x: number; y: number; vx: number; vy: number; life: number; maxLife: number; size: number; hue: number;
   kind: 'glow' | 'streak' | 'shard'; rot: number; spin: number;
 }
-export interface Spark { x: number; y: number; vy: number; phase: number; born: number; kind: SparkKind }
+/** `age` only advances while the run is live, so motes don't fade away behind the card screen. */
+export interface Spark { x: number; y: number; vy: number; phase: number; born: number; age: number; kind: SparkKind }
 export interface Enemy {
   x: number; y: number; vx: number; vy: number; r: number; phase: number; hue: number;
   geno: Genome; ph: Genome; shells: number; born: number; minDist: number; hitCd: number;
@@ -64,6 +65,8 @@ export interface Boss {
   /** Seconds into its death throes, 0 while alive. */
   dying: number;
   alpha: number;
+  /** Below a third of its health it fights faster and meaner. */
+  enraged: boolean;
 }
 
 export interface Game {
@@ -123,6 +126,17 @@ export interface Game {
   riftTimer: number;
   phasing: boolean;
   learned: Set<Gene>;
+  /** One-shot mutations already used up this run (a spent Second Sun isn't offered again). */
+  spent: Set<MutationId>;
+  stormTimer: number;
+  /** What landed the killing blow, for the death screen. */
+  killedBy: string;
+  bestStreak: number;
+  maxCombo: number;
+  /** Reduced flashing, shake and zoom punches. */
+  calm: boolean;
+  /** Until this clock time, a second R press makes the void forget you. */
+  forgetUntil: number;
   boss: Boss | null;
   echoes: Pt[];
   orbiters: Pt[];
@@ -150,8 +164,10 @@ export interface Game {
 }
 
 export const view = { W: 0, H: 0 };
-export const pointer = { x: 0, y: 0, moved: false };
-export const player = { x: 0, y: 0, vx: 0, vy: 0, speed: 0, invuln: 0 };
+/** `touch` is true once the player steers with a finger (or on a touch-first device), for the on-screen hints. */
+export const pointer = { x: 0, y: 0, moved: false, touch: false };
+/** `px, py` is where the wisp was last frame: hits are tested along the whole stretch it covered. */
+export const player = { x: 0, y: 0, px: 0, py: 0, vx: 0, vy: 0, speed: 0, invuln: 0 };
 export const wake: TimedPt[] = [];     // spatially sampled trail: drawn, and closes loops for Burning Wake
 export const history: TimedPt[] = [];  // per-frame positions, replayed by Echo ghosts
 export const pool = new GenePool();
@@ -225,6 +241,13 @@ export const G: Game = {
   riftTimer: 3,
   phasing: false,
   learned: new Set(),
+  spent: new Set(),
+  stormTimer: 0,
+  killedBy: '',
+  bestStreak: 0,
+  maxCombo: 0,
+  calm: stored('ember-calm') === 1,
+  forgetUntil: 0,
   boss: null,
   echoes: [],
   orbiters: [],
@@ -252,6 +275,13 @@ export const G: Game = {
 };
 
 export const tier = () => tierFor(G.evolutions);
+/** How close `p` came to the wisp this frame, so a fast flick can't skip clean through something. */
+export const sweptDist = (p: Pt) => segmentDistance(p, { x: player.px, y: player.py }, player);
+/** The combo keeps counting, but its score multiplier tops out here. */
+export const COMBO_CAP = 50;
+export const comboMult = () => Math.max(1, Math.min(G.combo, COMBO_CAP));
+/** Seconds between sparks before the combo breaks. */
+export const comboWindow = () => 2.2 + 0.8 * G.levels.kindle;
 export const maxCharge = () => 3 + G.levels.capacitor;
 export const maxHp = () => 3 + G.levels.heart + up('embers');
 export const playerRadius = () => 7 + tier() * 0.5;
@@ -265,6 +295,8 @@ export const phaseDuration = () => [1, 0.7, 1.0][G.levels.phase];
 export const stasisRadius = () => (G.levels.stasis ? 110 + 50 * G.levels.stasis : 0);
 export const stasisFactor = () => [1, 0.55, 0.4][G.levels.stasis];
 export const sector = (): SectorDef => SECTORS[G.sector];
+/** The Abyss, or an Eclipse anywhere else: you only see what your own light reaches. */
+export const isDark = () => sector().hazard === 'dark' || G.event?.kind === 'eclipse';
 export const feverOn = () => G.feverTime > 0;
 export const scoreMult = () => (G.feverTime > 0 ? 3 : 1) * (G.event?.kind === 'bloodmoon' ? 2 : 1);
 export const essenceMult = () => 1 + 0.15 * up('kindling');

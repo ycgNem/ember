@@ -6,7 +6,7 @@ import { damageBoss } from './boss';
 import { damagePlayer, dropSpark, killEnemy } from './combat';
 import { addShake, burst, shock } from './fx';
 import { drawGlow } from './glow';
-import { G, player, playerRadius, sector, view, type Jelly, type Rift } from './state';
+import { G, player, playerRadius, sector, sweptDist, view, type Jelly, type Rift } from './state';
 import { TAU, clamp, rand, type Pt } from './util';
 
 export const HORIZON_R = 48;
@@ -61,7 +61,7 @@ function updateJellies(dt: number, playing: boolean) {
     if (j.y < -80) Object.assign(j, spawnJelly());
     if (j.x < -60) j.x = view.W + 60;
     if (j.x > view.W + 60) j.x = -60;
-    if (playing && Math.hypot(player.x - j.x, player.y - j.y) < j.r * 0.8 + pr) damagePlayer();
+    if (playing && sweptDist(j) < j.r * 0.8 + pr) damagePlayer('a reef jelly');
   }
   G.jellies = G.jellies.filter((j) => !j.dead);
 }
@@ -106,8 +106,11 @@ function updateRifts(dt: number, playing: boolean) {
     if (r.t < RIFT_WARN || r.t > RIFT_WARN + RIFT_TEAR) continue;
     const dx = Math.cos(r.angle);
     const dy = Math.sin(r.angle);
-    const lineDist = (p: Pt) => Math.abs((p.x - r.x) * dy - (p.y - r.y) * dx);
-    if (playing && lineDist(player) < 14 + pr) damagePlayer(null, true);  // torn space ignores Phase
+    const side = (p: Pt) => (p.x - r.x) * dy - (p.y - r.y) * dx;
+    const lineDist = (p: Pt) => Math.abs(side(p));
+    // crossing the tear counts even if a flick carried you over it between frames
+    const crossed = side(player) * side({ x: player.px, y: player.py }) < 0;
+    if (playing && (lineDist(player) < 14 + pr || crossed)) damagePlayer('a rift', null, true);  // torn space ignores Phase
     // the tear doesn't care whose side you're on
     for (const e of G.enemies) {
       if (!e.dead && !r.hit.has(e) && lineDist(e) < e.r + 12) {
@@ -156,7 +159,18 @@ function updateGravity(dt: number, playing: boolean) {
     b.vy += (dy / d) * f;
     if (d < HORIZON_R) b.dead = true;
   }
-  if (playing && Math.hypot(player.x - c.x, player.y - c.y) < HORIZON_R + playerRadius()) damagePlayer(null, true);
+  // the apex falls inward too: it's heavy enough to resist, but the horizon burns it if it strays too close
+  const b = G.boss;
+  if (b && b.enter >= 1 && b.dying === 0) {
+    const dx = c.x - b.x;
+    const dy = c.y - b.y;
+    const d = Math.hypot(dx, dy) || 1;
+    const f = (9000 / (d + 80)) * dt;
+    b.vx += (dx / d) * f;
+    b.vy += (dy / d) * f;
+    if (d < HORIZON_R + b.r * 0.6) damageBoss(9 * dt, c.x, c.y, true, true);
+  }
+  if (playing && sweptDist(c) < HORIZON_R + playerRadius()) damagePlayer('the event horizon', null, true);
 }
 
 // ---------- drawing ----------

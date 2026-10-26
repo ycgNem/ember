@@ -1,6 +1,8 @@
 // The Starforge: permanent upgrades bought with stardust earned across runs.
 
-export type UpgradeId = 'embers' | 'charge' | 'kindling' | 'lodestone' | 'foresight' | 'reroll' | 'headstart' | 'fervor' | 'luck';
+export type UpgradeId =
+  | 'embers' | 'charge' | 'kindling' | 'lodestone' | 'foresight' | 'reroll' | 'headstart' | 'fervor' | 'luck'
+  | 'afterglow' | 'abundance' | 'prospector';
 
 export interface UpgradeDef {
   id: UpgradeId;
@@ -31,6 +33,12 @@ export const UPGRADES: readonly UpgradeDef[] = [
     desc: (l) => `Fever fills ${25 * l}% faster` },
   { id: 'luck', name: 'Stellar Luck', hue: 50, costs: [260, 550, 950],
     desc: (l) => `Rare, epic and legendary cards appear more often (${l}/3)` },
+  { id: 'afterglow', name: 'Afterglow', hue: 280, costs: [300, 650],
+    desc: (l) => `FEVER burns ${(1.5 * l).toFixed(1)}s longer` },
+  { id: 'abundance', name: 'Abundance', hue: 52, costs: [200, 450],
+    desc: (l) => `${l} more spark${l === 1 ? '' : 's'} drifting on the field at once` },
+  { id: 'prospector', name: 'Prospector', hue: 175, costs: [250, 500, 900],
+    desc: (l) => `Earn ${10 * l}% more stardust from every run` },
 ];
 
 type Levels = Record<UpgradeId, number>;
@@ -82,7 +90,11 @@ export function buy(u: UpgradeDef): boolean {
   return true;
 }
 
-/** Stardust a run earns: score, apexes slain, how deep you got, and how many voids fell. */
+/**
+ * Stardust a run earns: score, apexes slain, how deep you got, and how many voids fell.
+ * Score counts by its square root, so one lucky FEVER chain can't buy out the whole forge.
+ */
 export function dustFor(score: number, apexes: number, depth: number, kills: number) {
-  return Math.floor(score / 150 + apexes * 60 + depth * 25 + kills / 8);
+  const base = Math.sqrt(Math.max(0, score)) / 3 + apexes * 50 + depth * 25 + kills / 10;
+  return Math.floor(base * (1 + 0.1 * up('prospector')));
 }

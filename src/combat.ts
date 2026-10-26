@@ -9,9 +9,9 @@ import { HORIZON_R, horizonCenter, popJelly } from './hazards';
 import { addFever, registerKill } from './hype';
 import { up } from './meta';
 import {
-  G, budget, essenceMult, feverOn, history, maxCharge, maxHp, player, playerRadius, pool, scoreMult, sector,
-  stasisFactor, stasisRadius, tailLife, tier, view, wake, wakeCooldownTime,
-  type Enemy, type RingKind, type Spark, type SparkKind,
+  COMBO_CAP, G, budget, comboMult, comboWindow, essenceMult, feverOn, history, maxCharge, maxHp, player, playerRadius, pool,
+  scoreMult, sector, stasisFactor, stasisRadius, sweptDist, tailLife, tier, view, wake, wakeCooldownTime,
+  type Bullet, type Enemy, type RingKind, type Spark, type SparkKind,
 } from './state';
 import { TAU, pointInPolygon, rand, type Pt } from './util';
 
@@ -19,8 +19,9 @@ const MAX_ENEMIES = 80;
 export const RING_SPEED = 1100;
 const RING_DAMAGE: Record<RingKind, number> = { pulse: 7, flare: 7, echo: 3, bloom: 2, nova: 15, fever: 2 };
 
-export type HurtKind = 'pulse' | 'touch' | 'shard' | 'scorch' | 'crush';
-const THREAT_OF: Record<HurtKind, Threat> = { pulse: 'pulse', touch: 'touch', shard: 'shard', scorch: 'fire', crush: 'gravity' };
+export type HurtKind = 'pulse' | 'touch' | 'shard' | 'scorch' | 'crush' | 'storm';
+/** The void only studies what *you* do to it; an Ion Storm's lightning teaches it nothing. */
+const THREAT_OF: Record<HurtKind, Threat | undefined> = { pulse: 'pulse', touch: 'touch', shard: 'shard', scorch: 'fire', crush: 'gravity', storm: undefined };
 
 // ---------- spawning ----------
 
@@ -34,7 +35,7 @@ export function edgePoint(margin = 40): Pt {
 }
 
 function sparkAt(x: number, y: number, kind: SparkKind, vy = 0): Spark {
-  return { x, y, vy, phase: rand(0, TAU), born: G.clock, kind };
+  return { x, y, vy, phase: rand(0, TAU), born: G.clock, age: 0, kind };
 }
 
 export function spawnSpark() {
@@ -147,7 +148,7 @@ export function killEnemy(e: Enemy, mult = 1, threat?: Threat) {
   if (mult > 0) blip(rand(160, 240), 0.18, 'square', 0.05, 0.4);
   if (G.state === 'play' && mult > 0) {  // kills from effects still running after death don't score
     G.kills++;
-    const gain = Math.round(25 * Math.max(1, G.combo) * mult * (e.elite ? 8 : 1) * scoreMult());
+    const gain = Math.round(25 * comboMult() * mult * (e.elite ? 8 : 1) * scoreMult());
     G.score += gain;
     popup(e.x, e.y, `+${gain}`, e.hue, e.elite ? 22 : 15);
     for (let i = 0; i < G.levels.predator * (e.elite ? 3 : 1); i++) dropSpark(e.x, e.y, 'mote');
@@ -180,17 +181,27 @@ export function killEnemy(e: Enemy, mult = 1, threat?: Threat) {
   }
 }
 
+/** How the death screen names whatever hit you. */
+export function voidName(e: Enemy): string {
+  return e.elite ? 'an elite void' : e.pierce ? 'a piercing void' : 'a void';
+}
+
 /**
  * Returns whether the hit landed. Invulnerability always protects; Phase protects
- * unless the source pierces it.
+ * unless the source pierces it. `cause` names the attacker for the death screen.
  */
-export function damagePlayer(credit: Enemy | null = null, pierce = false): boolean {
+export function damagePlayer(cause: string, credit: Enemy | null = null, pierce = false): boolean {
   if (G.state !== 'play' || player.invuln > 0 || (G.phasing && !pierce)) return false;
   if (credit) credit.dealt += 1;
   G.hp -= 1;
+  G.killedBy = cause;
   player.invuln = 1.5;
   G.hurtFlash = 1;
   G.streak = 0;
+  // a hit breaks the spark combo too: getting tagged has to cost something
+  if (G.combo > 1) popup(player.x, player.y + 34, 'COMBO BROKEN', 0, 13);
+  G.combo = 0;
+  G.comboTimer = 0;
   addShake(16);
   shock(player.x, player.y, 180, 22, 0.45);
   burst(player.x, player.y, 0, 30, 320, 6);
@@ -206,10 +217,15 @@ export function damagePlayer(credit: Enemy | null = null, pierce = false): boole
       e.vy += (dy / d) * 700;
     }
   }
+  if (G.levels.flashpoint) {
+    emitRing(player.x, player.y, [0, 300, 420][G.levels.flashpoint], 'flare', 15);
+    if (G.levels.flashpoint >= 2) player.invuln += 0.6;
+  }
   if (G.hp > 0) return true;
 
   if (G.levels.rebirth > 0) {
     G.levels.rebirth = 0;
+    G.spent.add('rebirth');
     G.hp = maxHp();
     player.invuln = 2;
     emitRing(player.x, player.y, Math.hypot(view.W, view.H), 'nova', 38);
@@ -237,6 +253,7 @@ export function pulse() {
   const maxR = 260 * (1 + 0.3 * G.levels.corona);
   emitRing(player.x, player.y, maxR, 'pulse', G.hue);
   if (G.levels.binary >= 2 && G.mirror) emitRing(G.mirror.x, G.mirror.y, 200, 'echo', G.hue + 180);
+  if (G.levels.mirrors) for (const g of G.echoes) emitRing(g.x, g.y, 180, 'echo', 262);
   if (G.levels.singularity > 0) {
     const life = (1.6 + G.levels.singularity * 0.9) * (G.levels.devourer ? 1.5 : 1);
     G.wells.push({ x: player.x, y: player.y, life, maxLife: life });
@@ -270,8 +287,11 @@ export function collect(s: Spark) {
   }
   const gold = s.kind === 'gold';
   G.combo += 1;
-  G.comboTimer = 2.2;
-  const gain = (gold ? 60 : 10) * G.combo * scoreMult();
+  G.maxCombo = Math.max(G.maxCombo, G.combo);
+  G.comboTimer = comboWindow();
+  if (G.combo === COMBO_CAP) popup(player.x, player.y - 60, `MAX COMBO x${COMBO_CAP}`, 50, 18);
+  if (G.levels.kindle && G.combo % 10 === 0) G.charge = Math.min(maxCharge(), G.charge + 0.5);
+  const gain = (gold ? 60 : 10) * comboMult() * scoreMult();
   G.score += gain;
   G.essence += (gold ? 3 : 1) * essenceMult();
   // sparks charge twice as fast during an apex fight, so you can keep the pressure on
@@ -325,10 +345,27 @@ function arcFrom(src: Enemy) {
     if (!next) break;
     hit.add(next);
     G.bolts.push({ pts: jagged(from, next), life: 0.2 });
+    hurt(next, 'shard', from.x, from.y);  // knocked back along the bolt
     from = { x: next.x, y: next.y };
-    hurt(next, 'shard', from.x, from.y);
   }
   if (hit.size > 1) blip(1800, 0.08, 'sawtooth', 0.04, 0.3);
+}
+
+/** Ion Storm: lightning from the sky strikes a random void. */
+export function strike() {
+  const live = G.enemies.filter((e) => !e.dead);
+  const e = live[Math.floor(Math.random() * live.length)];
+  if (!e) return;
+  G.bolts.push({ pts: jagged({ x: e.x + rand(-80, 80), y: -20 }, e), life: 0.25 });
+  hurt(e, 'storm', e.x, e.y - 40);
+  shock(e.x, e.y, 70, 8, 0.25);
+  blip(rand(1600, 2200), 0.1, 'sawtooth', 0.035, 0.3);
+}
+
+/** Reflection: spit your pulse swallows comes back out as one of your homing shards. */
+function reflectBullet(b: Bullet) {
+  const a = rand(0, TAU);
+  G.shards.push({ x: b.x, y: b.y, vx: Math.cos(a) * 200, vy: Math.sin(a) * 200, life: 1.8 });
 }
 
 /**
@@ -439,7 +476,8 @@ export function updateSparks(dt: number) {
   const eaters: Pt[] = [player, ...G.echoes];
   if (G.mirror) eaters.push(G.mirror);
   G.sparks = G.sparks.filter((s) => {
-    if (s.kind === 'mote' && G.clock - s.born > 6) return false;
+    s.age += dt;
+    if (s.kind === 'mote' && s.age > 6) return false;
     if (s.vy) {
       s.y += s.vy * dt;
       if (s.y > view.H + 40) return false;
@@ -541,7 +579,7 @@ export function updateEnemies(dt: number) {
     e.y += e.vy * dt * slow;
 
     if (!playing) continue;
-    if (Math.hypot(player.x - e.x, player.y - e.y) < e.r + pr) {
+    if (sweptDist(e) < e.r + pr) {
       if (G.phasing && !e.pierce) {
         // slipped through it: the void takes note
         if (!e.dodged) {
@@ -549,7 +587,7 @@ export function updateEnemies(dt: number) {
           pool.noteThreat('phase');
         }
       } else {
-        damagePlayer(e, e.pierce);
+        damagePlayer(voidName(e), e, e.pierce);
         continue;
       }
     }
@@ -607,8 +645,8 @@ export function updateBullets(dt: number) {
       b.dead = true;
       continue;
     }
-    if (G.state === 'play' && d < b.r + pr) {
-      if (damagePlayer(b.owner)) {
+    if (G.state === 'play' && sweptDist(b) < b.r + pr) {
+      if (damagePlayer(b.owner ? 'void spit' : "an apex's barrage", b.owner)) {
         b.dead = true;
         burst(b.x, b.y, b.hue, 8, 160, 4);
         continue;
@@ -619,6 +657,7 @@ export function updateBullets(dt: number) {
       if (Math.hypot(o.x - b.x, o.y - b.y) < b.r + 9) {
         b.dead = true;
         burst(b.x, b.y, b.hue, 5, 120, 4);
+        if (G.levels.reflect >= 2) reflectBullet(b);
         break;
       }
     }
@@ -634,7 +673,10 @@ export function updateEffects(dt: number) {
       if (e.dead || r.hit.has(e)) continue;
       if (Math.hypot(e.x - r.x, e.y - r.y) < r.r + e.r) {
         r.hit.add(e);
-        if (r.kind === 'nova') {
+        // Absolute Zero: anything frozen in your stasis field shatters, shells and all
+        const frozen = G.levels.zero > 0 && (r.kind === 'pulse' || r.kind === 'flare') && Math.hypot(e.x - player.x, e.y - player.y) < stasisRadius();
+        if (r.kind === 'nova' || frozen) {
+          if (frozen) burst(e.x, e.y, 200, 16, 260, 6);
           killEnemy(e, 1, 'pulse');
         } else {
           hurt(e, 'pulse', r.x, r.y);
@@ -647,6 +689,7 @@ export function updateEffects(dt: number) {
         if (!b.dead && Math.hypot(b.x - r.x, b.y - r.y) < r.r) {
           b.dead = true;
           burst(b.x, b.y, b.hue, 4, 120, 4);
+          if (G.levels.reflect && G.shards.length < 120) reflectBullet(b);
         }
       }
     }
@@ -659,7 +702,8 @@ export function updateEffects(dt: number) {
     const boss = G.boss;
     if (boss && !r.hit.has(boss) && Math.hypot(boss.x - r.x, boss.y - r.y) < r.r + boss.r) {
       r.hit.add(boss);
-      damageBoss(RING_DAMAGE[r.kind], r.x, r.y, r.kind === 'nova');
+      const frozen = G.levels.zero > 0 && Math.hypot(boss.x - player.x, boss.y - player.y) < stasisRadius() + boss.r;
+      damageBoss(RING_DAMAGE[r.kind], r.x, r.y, r.kind === 'nova' || frozen);
     }
   }
   G.rings = G.rings.filter((r) => r.r < r.maxR * 1.12);

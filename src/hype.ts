@@ -20,6 +20,8 @@ const STREAKS: readonly (readonly [number, string])[] = [
 /** Seconds between kills before a streak breaks. */
 const STREAK_WINDOW = 0.9;
 export const FEVER_TIME = 7;
+/** FEVER's length, stretched by the Starforge's Afterglow. */
+export const feverDuration = () => FEVER_TIME + 1.5 * up('afterglow');
 /** Announcer tier reserved for FEVER, drawn in rainbow. */
 export const FEVER_TIER = 99;
 
@@ -32,7 +34,7 @@ export function addFever(n: number) {
 
 function startFever() {
   G.fever = 0;
-  G.feverTime = FEVER_TIME;
+  G.feverTime = feverDuration();
   G.charge = maxCharge();
   announce('FEVER', 0, FEVER_TIER);
   hitstop(0.12);
@@ -54,6 +56,7 @@ function stinger(tier: number) {
 /** Call for every scoring kill: feeds the streak, the announcer, and the fever meter. */
 export function registerKill(x: number, y: number, elite: boolean) {
   G.streak++;
+  G.bestStreak = Math.max(G.bestStreak, G.streak);
   G.streakTimer = STREAK_WINDOW;
   addFever(elite ? 0.15 : 0.025);
   for (let i = STREAKS.length - 1; i >= 0; i--) {
@@ -61,7 +64,8 @@ export function registerKill(x: number, y: number, elite: boolean) {
     if (G.streak !== n) continue;
     const tier = i + 1;
     announce(name, 20 + tier * 32, tier);
-    const bonus = 100 * tier * Math.max(1, G.combo) * scoreMult();
+    // grows with the streak alone: stacking the spark combo on top made one FEVER chain worth millions
+    const bonus = 100 * tier * tier * scoreMult();
     G.score += bonus;
     popup(player.x, player.y - 48, `+${bonus}`, 50, 16 + tier);
     addFever(0.05);
@@ -76,13 +80,15 @@ export function registerKill(x: number, y: number, elite: boolean) {
 }
 
 export function updateHype(dt: number) {
-  if (G.streakTimer > 0) {
-    G.streakTimer -= dt;
-    if (G.streakTimer <= 0) G.streak = 0;
-  }
   if (G.announce) {
     G.announce.life -= dt;
     if (G.announce.life <= 0) G.announce = null;
+  }
+  // the world is frozen while you pick a card, so FEVER and the streak window wait too
+  if (G.state === 'evolve') return;
+  if (G.streakTimer > 0) {
+    G.streakTimer -= dt;
+    if (G.streakTimer <= 0) G.streak = 0;
   }
   if (G.feverTime > 0) {
     G.feverTime -= dt;

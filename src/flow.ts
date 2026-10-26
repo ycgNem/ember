@@ -2,7 +2,7 @@
 
 import { blip, noiseHit, setAmbient } from './audio';
 import { spawnBoss } from './boss';
-import { emitRing, recordFitness, spawnElite, spawnFallingSpark, spawnSpark, spawnWave, updateSparks } from './combat';
+import { emitRing, recordFitness, spawnElite, spawnFallingSpark, spawnSpark, spawnWave, strike, updateSparks } from './combat';
 import { addShake, announce, banner, burst, hitstop, popup, punch } from './fx';
 import { GENES, LEARN_AT } from './genome';
 import { resetHazards } from './hazards';
@@ -16,10 +16,12 @@ import {
 import { pick, rand } from './util';
 
 const EVENT_TIME = 12;
-const EVENTS: Record<EventKind, { name: string; sub: string; hue: number }> = {
+export const EVENTS: Record<EventKind, { name: string; sub: string; hue: number }> = {
   starfall: { name: 'STARFALL', sub: 'the sky is raining sparks', hue: 48 },
   bloodmoon: { name: 'BLOOD MOON', sub: 'twice the void, twice the glory', hue: 355 },
   goldrush: { name: 'GOLD RUSH', sub: 'every spark is a jackpot', hue: 45 },
+  eclipse: { name: 'ECLIPSE', sub: 'the lights go out', hue: 230 },
+  storm: { name: 'ION STORM', sub: 'the sky strikes the void for you', hue: 195 },
 };
 
 export function resetRun() {
@@ -39,8 +41,6 @@ export function resetRun() {
   G.feverTime = 0;
   G.feverIdle = 0;
   G.levels = emptyLevels();
-  G.hp = maxHp();
-  G.charge = Math.min(maxCharge(), 1 + up('charge'));
   G.phaseMeter = 1;
   G.phaseLocked = false;
   G.wakeCooldown = 0;
@@ -63,6 +63,11 @@ export function resetRun() {
   G.overclock = 0;
   G.constellation = 0;
   G.devoured = 0;
+  G.spent.clear();
+  G.stormTimer = 0;
+  G.killedBy = '';
+  G.bestStreak = 0;
+  G.maxCombo = 0;
   G.boss = null;
   G.particles = [];
   G.sparks = [];
@@ -78,8 +83,8 @@ export function resetRun() {
   G.banners = [];
   G.shocks = [];
   resetHazards();
-  player.x = pointer.x;
-  player.y = pointer.y;
+  player.x = player.px = pointer.x;
+  player.y = player.py = pointer.y;
   player.vx = player.vy = player.speed = 0;
   player.invuln = 0;
   wake.length = 0;
@@ -97,6 +102,9 @@ export function resetRun() {
     G.evolutions++;
   }
   G.need = essenceNeeded(G.evolutions);
+  // a head-start Ember Heart or Capacitor arrives filled, not as an empty slot
+  G.hp = maxHp();
+  G.charge = Math.min(maxCharge(), 1 + up('charge') + G.levels.capacitor);
 
   G.state = 'play';
   const s = SECTORS[0];
@@ -107,7 +115,9 @@ export function resetRun() {
 // ---------- events ----------
 
 function startEvent() {
-  const kind = pick(Object.keys(EVENTS) as EventKind[]);
+  // the Abyss is already dark, so it never eclipses
+  const kinds = (Object.keys(EVENTS) as EventKind[]).filter((k) => !(k === 'eclipse' && sector().hazard === 'dark'));
+  const kind = pick(kinds);
   const def = EVENTS[kind];
   G.event = { kind, time: EVENT_TIME, maxTime: EVENT_TIME };
   announce(def.name, def.hue, 6);
@@ -127,6 +137,13 @@ function updateEvent(dt: number) {
   }
   G.event.time -= dt;
   if (G.event.kind === 'starfall' && Math.random() < dt * 6) spawnFallingSpark();
+  if (G.event.kind === 'storm') {
+    G.stormTimer -= dt;
+    if (G.stormTimer <= 0) {
+      G.stormTimer = rand(0.3, 0.6);
+      strike();
+    }
+  }
   if (G.event.time <= 0) G.event = null;
 }
 
@@ -144,7 +161,7 @@ export function updatePlay(dt: number) {
 
   updateEvent(dt);
 
-  const wantSparks = Math.min(12, 4 + Math.floor(G.sectorTime / 25) + (G.feverTime > 0 ? 3 : 0));
+  const wantSparks = Math.min(12, 4 + Math.floor(G.sectorTime / 25) + (G.feverTime > 0 ? 3 : 0)) + up('abundance');
   let live = 0;
   for (const s of G.sparks) if (s.kind !== 'mote' && !s.vy) live++;
   for (; live < wantSparks; live++) spawnSpark();
@@ -176,7 +193,7 @@ export function updatePlay(dt: number) {
 // ---------- evolving ----------
 
 function rollCards() {
-  G.offer = rollOffer(G.levels, G.evolutions === 0, 3 + up('foresight'));
+  G.offer = rollOffer(G.levels, G.evolutions === 0, 3 + up('foresight'), G.spent);
   G.rarities = G.offer.map((id) => (MUTATION_BY_ID[id].requires ? 'legendary' : rollRarity(up('luck'), G.rarityFloor)));
   G.offerTime = 0;
   if (G.rarities.includes('legendary')) {
@@ -212,14 +229,20 @@ export function choose(i: number) {
   G.rarityFloor = 'common';
   const before = tier();
   let overflow = 0;
+  let gained = 0;
   for (let k = 0; k < RARITY[rarity].levels; k++) {
-    if (G.levels[id] < m.max) G.levels[id]++;
-    else overflow++;
+    if (G.levels[id] < m.max) {
+      G.levels[id]++;
+      gained++;
+    } else {
+      overflow++;
+    }
   }
   G.evolutions++;
   G.need = essenceNeeded(G.evolutions);
-  if (id === 'capacitor') G.charge += 1;
-  if (id === 'heart') G.hp = Math.min(maxHp(), G.hp + 1);
+  // every level gained pays out, so an epic Ember Heart heals twice
+  if (id === 'capacitor') G.charge += gained;
+  if (id === 'heart') G.hp = Math.min(maxHp(), G.hp + gained);
   G.hp = Math.min(maxHp(), G.hp + overflow);  // levels past the max become healing
   if (rarity === 'rare') G.charge = maxCharge();
   G.charge = Math.min(maxCharge(), G.charge);
@@ -317,6 +340,7 @@ export function die() {
   G.deadTimer = 0;
   G.phasing = false;
   G.feverTime = 0;
+  G.banners = [];  // nothing stale hanging over the death screen
   addShake(22);
   burst(player.x, player.y, G.hue, 90, 520, 10);
   burst(player.x, player.y, 0, 30, 300, 6);
@@ -332,8 +356,11 @@ export function die() {
   saveMeta();
 }
 
+/** Seconds the death screen holds before a click relights, so a panicked pulse can't skip the recap. */
+export const DEATH_HOLD = 1.5;
+
 export function openForge() {
-  if (G.state !== 'title' && !(G.state === 'dead' && G.deadTimer > 0.8)) return;
+  if (G.state !== 'title' && !(G.state === 'dead' && G.deadTimer > DEATH_HOLD)) return;
   G.forgeFrom = G.state;
   G.state = 'forge';
   blip(330, 0.3, 'triangle', 0.06, 1.5);

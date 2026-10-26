@@ -9,7 +9,7 @@ import '@fontsource/chakra-petch/700.css';
 import { blip, ensureAudio, setAmbient, setMusicIntensity, toggleMute } from './audio';
 import { spawnBoss, updateBoss } from './boss';
 import { pulse, updateBullets, updateCompanions, updateEffects, updateEnemies } from './combat';
-import { choose, closeForge, openForge, reroll, resetRun, startWarp, updatePlay, updateWarp } from './flow';
+import { DEATH_HOLD, choose, closeForge, openForge, reroll, resetRun, startWarp, updatePlay, updateWarp } from './flow';
 import { banner } from './fx';
 import { HORIZON_R, horizonCenter, updateHazards } from './hazards';
 import { deathForgeRect, drawHud, forgeLayout, hoveredCard, noteBuy, pointerIn, rerollRect, titleForgeRect } from './hud';
@@ -19,7 +19,7 @@ import { TIERS } from './mutations';
 import { seedDust, updateDust, updatePlayer } from './player';
 import { Post, type PostParams } from './post';
 import { renderWorld } from './render';
-import { G, WARP_TIME, player, pointer, pool, sector, tier, view, wake, wakeLife } from './state';
+import { G, WARP_TIME, isDark, player, pointer, pool, sector, store, tier, view, wake, wakeLife } from './state';
 import { rand } from './util';
 
 // ---------- canvases ----------
@@ -64,8 +64,9 @@ function resize() {
 }
 window.addEventListener('resize', resize);
 resize();
-pointer.x = player.x = view.W / 2;
-pointer.y = player.y = view.H / 2;
+pointer.x = player.x = player.px = view.W / 2;
+pointer.y = player.y = player.py = view.H / 2;
+pointer.touch = window.matchMedia('(pointer: coarse)').matches;
 
 for (const f of ['700 16px Orbitron', '900 16px Orbitron', '400 16px "Chakra Petch"', '700 16px "Chakra Petch"']) {
   void document.fonts.load(f);
@@ -96,13 +97,33 @@ function forgeClick() {
   }
 }
 
+// On touch, the first finger down steers; any other finger tapped while it's held pulses
+// in place, so you don't have to lift off (and teleport the wisp to the tap) to fire.
+let steerFinger: number | null = null;
+
+function releaseFinger(e: PointerEvent) {
+  if (e.pointerId === steerFinger) steerFinger = null;
+}
+hudCanvas.addEventListener('pointerup', releaseFinger);
+hudCanvas.addEventListener('pointercancel', releaseFinger);
+
 hudCanvas.addEventListener('pointermove', (e) => {
+  if (e.pointerType === 'touch' && steerFinger !== null && e.pointerId !== steerFinger) return;
   pointer.x = e.clientX;
   pointer.y = e.clientY;
   pointer.moved = true;
 }, { passive: true });
 
 hudCanvas.addEventListener('pointerdown', (e) => {
+  pointer.touch = e.pointerType === 'touch';
+  if (pointer.touch) {
+    if (steerFinger !== null && e.pointerId !== steerFinger) {
+      start();
+      if (G.state === 'play' && !G.paused) pulse();
+      return;
+    }
+    steerFinger = e.pointerId;
+  }
   pointer.moved = true;
   pointer.x = e.clientX;
   pointer.y = e.clientY;
@@ -120,7 +141,7 @@ hudCanvas.addEventListener('pointerdown', (e) => {
       forgeClick();
       break;
     case 'dead':
-      if (G.deadTimer <= 0.8) break;
+      if (G.deadTimer <= DEATH_HOLD) break;
       if (pointerIn(deathForgeRect())) openForge();
       else resetRun();
       break;
@@ -136,14 +157,27 @@ hudCanvas.addEventListener('pointerdown', (e) => {
   }
 });
 
+/** Wiping the void's memory takes two presses, so a stray R on the death screen can't erase it. */
+function forget() {
+  if (G.clock < G.forgetUntil) {
+    G.forgetUntil = 0;
+    pool.reset();
+    banner('THE VOID FORGETS', 'its memory of you is gone', 320);
+    return;
+  }
+  G.forgetUntil = G.clock + 2.5;
+  banner('FORGET?', `press R again to wipe ${pool.generation} generations of memory`, 320);
+}
+
 window.addEventListener('keydown', (e) => {
   start();
   const s = G.state;
+  if (e.repeat && e.code !== 'Space') return;
   if (e.code === 'Space') {
     e.preventDefault();
     if (G.paused) G.paused = false;
     else if (s === 'play') pulse();
-    else if (s === 'title' || (s === 'dead' && G.deadTimer > 0.8)) resetRun();
+    else if (s === 'title' || (s === 'dead' && G.deadTimer > DEATH_HOLD)) resetRun();
   } else if (e.code === 'KeyF') {
     if (s === 'forge') closeForge();
     else openForge();
@@ -153,20 +187,26 @@ window.addEventListener('keydown', (e) => {
     G.paused = !G.paused;
   } else if (e.code === 'KeyM') {
     banner(toggleMute() ? 'MUTED' : 'SOUND ON', '', 200);
+  } else if (e.code === 'KeyC') {
+    G.calm = !G.calm;
+    store('ember-calm', G.calm ? 1 : 0);
+    banner(G.calm ? 'CALM VISUALS' : 'FULL VISUALS', G.calm ? 'less flashing, shaking and zooming' : 'every flash and shake restored', 200);
   } else if (s === 'evolve' && G.offerTime > 0.35 && /^Digit[1-4]$/.test(e.code)) {
     choose(Number(e.code.slice(5)) - 1);
   } else if (e.code === 'KeyR') {
     if (s === 'evolve') reroll();
-    else if (s === 'title' || s === 'dead') {
-      pool.reset();
-      banner('THE VOID FORGETS', 'its memory of you is gone', 320);
-    }
+    else if (s === 'title' || s === 'dead') forget();
   }
 });
 
+const autoPause = () => {
+  if (G.state === 'play' || G.state === 'evolve' || G.state === 'warp') G.paused = true;
+};
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden && (G.state === 'play' || G.state === 'evolve' || G.state === 'warp')) G.paused = true;
+  if (document.hidden) autoPause();
 });
+// alt-tabbing to another window leaves the page visible but the wisp uncontrolled
+window.addEventListener('blur', autoPause);
 
 // ---------- update ----------
 
@@ -257,7 +297,7 @@ function postParams(shakeX: number, shakeY: number, dt: number): PostParams {
   const s = sector();
   const inSector = G.state !== 'title' && !(G.state === 'forge' && G.forgeFrom === 'title');
   const ease = (v: number, target: number, rate: number) => v + (target - v) * Math.min(1, dt * rate);
-  darkness = ease(darkness, s.hazard === 'dark' && inSector && G.state !== 'warp' ? 1 : 0, 1.5);
+  darkness = ease(darkness, isDark() && inSector && G.state !== 'warp' ? 1 : 0, 1.5);
   blood = ease(blood, G.event?.kind === 'bloodmoon' ? 1 : 0, 1.2);
   feverGlow = ease(feverGlow, G.feverTime > 0 ? 1 : 0, 4);
   const warp = G.state === 'warp' ? Math.sin((Math.PI * G.warpTime) / WARP_TIME) : 0;
@@ -287,6 +327,8 @@ function postParams(shakeX: number, shakeY: number, dt: number): PostParams {
     for (const b of G.bullets) if (lights.length < 16) lights.push({ x: b.x, y: b.y, r: 45 });
   }
 
+  // calm visuals: keep the hits readable but drop most of the strobing and lurching
+  const calm = G.calm ? 0.3 : 1;
   return {
     time: G.clock,
     width: view.W,
@@ -299,10 +341,10 @@ function postParams(shakeX: number, shakeY: number, dt: number): PostParams {
     dark: darkness,
     lights,
     warp,
-    aberration: 0.006 + G.shake * 0.0012 + G.hurtFlash * 0.03 + warp * 0.03 + G.zoom * 0.15 + feverGlow * 0.006,
-    hurt: G.hurtFlash,
-    flash: G.flash,
-    zoom: G.zoom,
+    aberration: 0.006 + (G.shake * 0.0012 + G.hurtFlash * 0.03 + warp * 0.03 + G.zoom * 0.15 + feverGlow * 0.006) * calm,
+    hurt: G.hurtFlash * (G.calm ? 0.5 : 1),
+    flash: G.flash * calm,
+    zoom: G.zoom * calm,
     zoomAt: { x: G.zoomX, y: G.zoomY },
     blood,
     fever: feverGlow,
@@ -311,8 +353,9 @@ function postParams(shakeX: number, shakeY: number, dt: number): PostParams {
 
 function render(dt: number) {
   renderWorld(world);
-  const sx = G.shake > 0.3 ? rand(-G.shake, G.shake) : 0;
-  const sy = G.shake > 0.3 ? rand(-G.shake, G.shake) : 0;
+  const shake = G.shake * (G.calm ? 0.25 : 1);
+  const sx = shake > 0.3 ? rand(-shake, shake) : 0;
+  const sy = shake > 0.3 ? rand(-shake, shake) : 0;
   if (post) {
     post.render(worldCanvas, postParams(sx, sy, dt));
   } else if (flat) {
@@ -327,7 +370,7 @@ function render(dt: number) {
 
 // dev-only console handle for testing later content: ember.warp(), ember.boss(), ember.fever(), ember.G
 if (import.meta.env.DEV) {
-  Object.assign(window, { ember: { G, pool, meta, warp: startWarp, boss: spawnBoss, fever: () => addFever(1) } });
+  Object.assign(window, { ember: { G, player, view, pool, meta, warp: startWarp, boss: spawnBoss, fever: () => addFever(1) } });
 }
 
 let last = performance.now();

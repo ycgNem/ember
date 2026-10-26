@@ -1,13 +1,14 @@
 // The HUD, drawn crisp on its own canvas above the post-processed world.
 
+import { DEATH_HOLD, EVENTS } from './flow';
 import { ANNOUNCE_LIFE } from './fx';
 import { GENES, GENE_HUE, GENE_LABEL, THREAT_LABEL } from './genome';
 import { drawGlow } from './glow';
-import { FEVER_TIER, FEVER_TIME } from './hype';
+import { FEVER_TIER, feverDuration } from './hype';
 import { UPGRADES, meta, nextCost, type UpgradeDef } from './meta';
 import { MUTATIONS, MUTATION_BY_ID, RARITY, TIERS, roman } from './mutations';
 import { SECTORS } from './sectors';
-import { G, maxCharge, maxHp, player, pointer, pool, sector, tier, view } from './state';
+import { COMBO_CAP, G, comboWindow, isDark, maxCharge, maxHp, player, pointer, pool, sector, tier, view } from './state';
 import { TAU, clamp } from './util';
 
 const DISPLAY = 'Orbitron, system-ui, sans-serif';
@@ -64,6 +65,14 @@ function bar(x: number, y: number, w: number, ht: number, fill: number, color: s
   h.roundRect(x, y, Math.max(ht, w * clamp(fill, 0, 1)), ht, ht / 2);
   h.fill();
   h.shadowBlur = 0;
+}
+
+/** A soft dark plate behind HUD text that sits over the playfield. */
+function backing(x: number, y: number, w: number, ht: number) {
+  h.fillStyle = 'rgba(3, 3, 10, 0.42)';
+  h.beginPath();
+  h.roundRect(x, y, w, ht, 8);
+  h.fill();
 }
 
 function gem(x: number, y: number, s: number, color: string) {
@@ -149,18 +158,25 @@ export function deathForgeRect(): Rect {
   return { x: view.W / 2 - 120, y: view.H / 2 + 128, w: 240, h: 42 };
 }
 
+/** Short screens (landscape phones) get a compact forge: smaller title, wider grid, slimmer tiles. */
+const forgeShort = () => view.H < 560;
+
 export function forgeLayout(): { tiles: (Rect & { u: UpgradeDef })[]; back: Rect; top: number } {
   const { W, H } = view;
-  const cols = W < 760 ? 2 : 3;
-  const gap = 14;
-  const tw = Math.min(260, (W - 60 - (cols - 1) * gap) / cols);
-  const th = W < 760 ? 106 : 118;
+  const short = forgeShort();
+  const cols = W < 640 ? 2 : W < 1180 && !short ? 3 : 4;
+  const gap = W < 760 || short ? 10 : 14;
+  const tw = Math.min(260, (W - 40 - (cols - 1) * gap) / cols);
   const rows = Math.ceil(UPGRADES.length / cols);
+  const titleRoom = short ? 64 : 120;
+  const backRoom = short ? 46 : 80;
+  const th = clamp((H - titleRoom - backRoom - (rows - 1) * gap) / rows, 56, W < 760 ? 100 : 118);
   const gridH = rows * th + (rows - 1) * gap;
-  const top = Math.max(120, H / 2 - gridH / 2 + 20);
+  const top = short ? titleRoom : Math.max(titleRoom, H / 2 - gridH / 2 + 20);
   const left = W / 2 - (cols * tw + (cols - 1) * gap) / 2;
   const tiles = UPGRADES.map((u, i) => ({ u, x: left + (i % cols) * (tw + gap), y: top + Math.floor(i / cols) * (th + gap), w: tw, h: th }));
-  return { tiles, back: { x: W / 2 - 80, y: top + gridH + 22, w: 160, h: 40 }, top };
+  const back = short ? { x: W / 2 - 70, y: top + gridH + 8, w: 140, h: 30 } : { x: W / 2 - 80, y: top + gridH + 22, w: 160, h: 40 };
+  return { tiles, back, top };
 }
 
 export { inside as pointerIn };
@@ -204,7 +220,8 @@ function drawEvolve() {
   h.shadowBlur = 26;
   text('EVOLVE', W / 2, top, narrow ? 30 : 42, `hsl(${G.hue}, 100%, 88%)`, 'center', 900, DISPLAY, 10);
   h.shadowBlur = 0;
-  text(`choose a mutation  ·  click or press 1-${G.offer.length}`, W / 2, top + 26, 13, 'rgba(255,255,255,0.55)', 'center', 400);
+  const how = pointer.touch ? 'tap a card' : `click or press 1-${G.offer.length}`;
+  text(`choose a mutation  ·  ${how}`, W / 2, top + 26, 13, 'rgba(255,255,255,0.55)', 'center', 400);
 
   const hov = G.offerTime > 0.35 ? hoveredCard() : -1;
   rects.forEach((r, i) => {
@@ -281,7 +298,10 @@ function drawTitle() {
   h.shadowBlur = 0;
   text('evolve.  the void evolves too.', W / 2, H / 2 + 14, Math.min(19, W / 22), 'rgba(255,255,255,0.75)', 'center', 400, UI, 2);
   text('CLICK TO BEGIN', W / 2, H / 2 + 62, 15, `rgba(255,255,255,${pulseA})`, 'center', 700, DISPLAY, 4);
-  text('move to drift  ·  click / space to pulse  ·  P pause  ·  M mute', W / 2, H / 2 + 90, Math.min(13, W / 34), 'rgba(255,255,255,0.4)', 'center', 400);
+  const controls = pointer.touch
+    ? 'drag to drift  ·  tap a second finger to pulse'
+    : 'move to drift  ·  click / space to pulse  ·  P pause  ·  M mute  ·  C calm visuals';
+  text(controls, W / 2, H / 2 + 90, Math.min(13, W / 34), 'rgba(255,255,255,0.4)', 'center', 400);
   if (G.best > 0 || G.deepest > 0) {
     const deep = G.deepest > 0 ? SECTORS[(G.deepest - 1) % SECTORS.length].name : '';
     const asc = G.deepest > SECTORS.length ? ` (ascension ${roman(Math.floor((G.deepest - 1) / SECTORS.length))})` : '';
@@ -294,21 +314,32 @@ function drawTitle() {
   if (pool.generation > 0) {
     const favors = pool.dominant(2).map((g) => GENE_LABEL[g]).join(' + ');
     text(`the void remembers you  ·  generation ${pool.generation}  ·  favors ${favors}`, W / 2, H - 58, Math.min(13, W / 36), 'hsla(320, 100%, 75%, 0.8)', 'center', 500);
-    text('press R to make it forget', W / 2, H - 36, 11, 'rgba(255,255,255,0.35)', 'center', 400);
+    if (!pointer.touch) text('press R twice to make it forget', W / 2, H - 36, 11, 'rgba(255,255,255,0.35)', 'center', 400);
   }
+}
+
+/** The largest size (down to `min`) at which `str` fits in `maxW`. */
+function fitSize(str: string, maxW: number, size: number, min: number, weight: number, font: string, spacing: number): number {
+  for (let s = size; s > min; s -= 0.5) {
+    h.font = `${weight} ${s}px ${font}`;
+    h.letterSpacing = `${spacing}px`;
+    if (h.measureText(str).width <= maxW) return s;
+  }
+  return min;
 }
 
 function drawForge() {
   const { W, H } = view;
-  h.fillStyle = 'rgba(3, 3, 9, 0.8)';
+  h.fillStyle = 'rgba(3, 3, 9, 0.88)';
   h.fillRect(0, 0, W, H);
   const { tiles, back, top } = forgeLayout();
+  const short = forgeShort();
   h.shadowColor = 'hsl(45, 100%, 55%)';
   h.shadowBlur = 24;
-  text('STARFORGE', W / 2, top - 58, Math.min(40, W / 14), 'hsl(45, 100%, 85%)', 'center', 900, DISPLAY, 10);
+  text('STARFORGE', W / 2, top - (short ? 34 : 58), Math.min(short ? 26 : 40, W / 14), 'hsl(45, 100%, 85%)', 'center', 900, DISPLAY, short ? 6 : 10);
   h.shadowBlur = 0;
-  gem(W / 2 - 52, top - 28, 8, 'hsl(48, 100%, 70%)');
-  text(`${meta.dust.toLocaleString()} stardust`, W / 2 - 38, top - 22, 16, 'hsl(48, 100%, 80%)', 'left', 700, UI);
+  gem(W / 2 - 52, top - (short ? 16 : 28), 8, 'hsl(48, 100%, 70%)');
+  text(`${meta.dust.toLocaleString()} stardust`, W / 2 - 38, top - (short ? 10 : 22), short ? 14 : 16, 'hsl(48, 100%, 80%)', 'left', 700, UI);
 
   for (const t of tiles) {
     const lvl = meta.levels[t.u.id];
@@ -324,24 +355,58 @@ function drawForge() {
     h.fill();
     h.stroke();
 
-    h.globalCompositeOperation = 'lighter';
-    drawGlow(h, t.x + 26, t.y + 28, 22, t.u.hue, 60, can || cost === null ? 1 : 0.4);
-    h.globalCompositeOperation = 'source-over';
-    text(t.u.name.toUpperCase(), t.x + 48, t.y + 32, 12, '#fff', 'left', 700, DISPLAY, 1);
+    const compact = t.w < 200 || t.h < 96;
+    const lit = can || cost === null ? 1 : 0.4;
+    if (t.w < 200) {
+      // phone-width tiles trade the glow icon for a slim accent, so long names keep their room
+      h.fillStyle = `hsla(${t.u.hue}, 100%, 65%, ${0.8 * lit})`;
+      h.fillRect(t.x + 6, t.y + 16, 3, 20);
+    } else {
+      h.globalCompositeOperation = 'lighter';
+      drawGlow(h, t.x + 24, t.y + 26, compact ? 17 : 22, t.u.hue, 60, lit);
+      h.globalCompositeOperation = 'source-over';
+    }
+    // names shrink to fit beside the level pips instead of running off the tile
+    const pipsW = t.u.costs.length * 12 + 6;
+    const nameX = t.x + (t.w < 200 ? 16 : compact ? 42 : 48);
+    const name = t.u.name.toUpperCase();
+    const nameSize = fitSize(name, t.x + t.w - 14 - pipsW - nameX, 12, 7.5, 700, DISPLAY, 1);
+    text(name, nameX, t.y + 30, nameSize, '#fff', 'left', 700, DISPLAY, 1);
     for (let k = 0; k < t.u.costs.length; k++) {
       h.fillStyle = k < lvl ? `hsl(${t.u.hue}, 100%, 65%)` : 'rgba(255,255,255,0.15)';
       h.fillRect(t.x + t.w - 14 - (t.u.costs.length - k) * 12, t.y + 24, 9, 4);
     }
+
+    // the price sits in the bottom-right corner; the description wraps around it
+    const priceLabel = cost === null ? 'MAXED' : String(cost);
+    h.font = `700 ${cost === null ? 11 : 13}px ${DISPLAY}`;
+    h.letterSpacing = cost === null ? '2px' : '0px';
+    const priceW = h.measureText(priceLabel).width + (cost === null ? 0 : 16);
+    const descSize = compact ? 11 : 12;
+    const lineH = compact ? 14 : 16;
+    const descTop = t.y + (compact ? 50 : 56);
+    const priceY = t.y + t.h - (compact ? 10 : 13);
+    const maxLines = Math.max(1, Math.floor((priceY - descTop) / lineH) + 1);
     const desc = t.u.desc(cost === null ? lvl : lvl + 1);
-    wrap(desc, t.w - 28, 12).slice(0, 2).forEach((line, k) => text(line, t.x + 14, t.y + 58 + k * 16, 12, 'rgba(255,255,255,0.72)', 'left', 400));
+    const lines = wrap(desc, t.w - 28, descSize);
+    const shown = lines.slice(0, maxLines);
+    const last = shown.length - 1;
+    // the last line shares the price's row only if it clears it
+    if (descTop + last * lineH > priceY - lineH + 2) {
+      const room = t.w - 28 - priceW - 10;
+      const tail = lines.slice(last).join(' ');
+      const cut = wrap(tail, room, descSize);
+      shown[last] = cut.length > 1 ? `${cut[0].replace(/[.,]$/, '')}…` : cut[0];
+    }
+    shown.forEach((line, k) => text(line, t.x + 14, descTop + k * lineH, descSize, 'rgba(255,255,255,0.72)', 'left', 400));
     if (cost === null) {
-      text('MAXED', t.x + t.w - 14, t.y + t.h - 14, 11, 'hsl(45, 100%, 70%)', 'right', 700, DISPLAY, 2);
+      text('MAXED', t.x + t.w - 14, priceY, 11, 'hsl(45, 100%, 70%)', 'right', 700, DISPLAY, 2);
     } else {
-      text(String(cost), t.x + t.w - 14, t.y + t.h - 13, 13, can ? 'hsl(48, 100%, 78%)' : 'rgba(255,255,255,0.35)', 'right', 700, DISPLAY);
-      gem(t.x + t.w - 14 - h.measureText(String(cost)).width - 10, t.y + t.h - 18, 5, can ? 'hsl(48, 100%, 70%)' : 'rgba(255,255,255,0.3)');
+      text(priceLabel, t.x + t.w - 14, priceY, 13, can ? 'hsl(48, 100%, 78%)' : 'rgba(255,255,255,0.35)', 'right', 700, DISPLAY);
+      gem(t.x + t.w - 14 - h.measureText(priceLabel).width - 10, priceY - 5, 5, can ? 'hsl(48, 100%, 70%)' : 'rgba(255,255,255,0.3)');
     }
   }
-  button(back, 'BACK  (ESC)', 200);
+  button(back, pointer.touch ? 'BACK' : 'BACK  (ESC)', 200);
 }
 
 function drawTopLeft() {
@@ -354,7 +419,8 @@ function drawTopLeft() {
   for (let i = 0; i < maxHp(); i++) ember(32 + i * 24, 72, 9, i < G.hp);
   if (G.combo > 1) {
     text(`x${G.combo}`, 24, 108, 20, `hsl(${G.hue}, 100%, 75%)`, 'left', 700, DISPLAY);
-    bar(24, 116, 70, 3, G.comboTimer / 2.2, `hsl(${G.hue}, 100%, 70%)`);
+    if (G.combo >= COMBO_CAP) text('MAX', 28 + h.measureText(`x${G.combo}`).width, 108, 10, 'hsl(48, 100%, 70%)', 'left', 700, DISPLAY, 2);
+    bar(24, 116, 70, 3, G.comboTimer / comboWindow(), `hsl(${G.hue}, 100%, 70%)`);
   }
 }
 
@@ -392,12 +458,13 @@ function drawTopCenter() {
 
 function drawTopRight() {
   const { W } = view;
-  text(`best ${G.best.toLocaleString()}`, W - 20, 40, 15, 'rgba(255,255,255,0.5)', 'right', 500);
+  // on a phone the best score would sit on top of the sector bar
+  if (G.best > 0 && W >= 640) text(`best ${G.best.toLocaleString()}`, W - 20, 40, 15, 'rgba(255,255,255,0.5)', 'right', 500);
   const ev = G.event;
   if (!ev) return;
-  const names = { starfall: 'STARFALL', bloodmoon: 'BLOOD MOON', goldrush: 'GOLD RUSH' };
-  const hue = ev.kind === 'bloodmoon' ? 355 : 48;
-  const label = `${names[ev.kind]}  ${Math.ceil(ev.time)}`;
+  const def = EVENTS[ev.kind];
+  const hue = def.hue;
+  const label = `${def.name}  ${Math.ceil(ev.time)}`;
   h.font = `700 11px ${DISPLAY}`;
   h.letterSpacing = '3px';
   const w = h.measureText(label).width + 24;
@@ -405,10 +472,11 @@ function drawTopRight() {
   h.strokeStyle = `hsl(${hue}, 100%, 65%)`;
   h.lineWidth = 1.5;
   h.beginPath();
-  h.roundRect(W - 20 - w, 54, w, 24, 12);
+  const y = W < 640 ? 108 : 54;
+  h.roundRect(W - 20 - w, y, w, 24, 12);
   h.fill();
   h.stroke();
-  text(label, W - 20 - w / 2, 70, 11, `hsl(${hue}, 100%, 85%)`, 'center', 700, DISPLAY, 3);
+  text(label, W - 20 - w / 2, y + 16, 11, `hsl(${hue}, 100%, 85%)`, 'center', 700, DISPLAY, 3);
 }
 
 function drawBottomCenter() {
@@ -447,7 +515,7 @@ function drawBottomCenter() {
     const hue = on ? (G.clock * 300 + k * 60) % 360 : 330 + k * 8;
     g.addColorStop(k / 6, `hsl(${hue}, 100%, ${on ? 62 : 58}%)`);
   }
-  bar(fx, fy, fw, 6, on ? G.feverTime / FEVER_TIME : G.fever, g);
+  bar(fx, fy, fw, 6, on ? G.feverTime / feverDuration() : G.fever, g);
   const ready = !on && G.fever > 0.85;
   text(on ? `FEVER  x3` : 'FEVER', fx - 10, fy + 7, 10, on || ready ? `hsl(${(G.clock * 300) % 360}, 100%, 75%)` : 'rgba(255,255,255,0.45)', 'right', 700, DISPLAY, 2);
 }
@@ -472,6 +540,7 @@ function drawMutationList() {
   if (W < 640) return;
   const held = MUTATIONS.filter((m) => G.levels[m.id] > 0);
   const step = held.length > 14 ? 14 : 17;
+  if (held.length) backing(W - 178, H - 22 - held.length * step - 2, 168, held.length * step + 14);
   let y = H - 22;
   for (let i = held.length - 1; i >= 0; i--) {
     const m = held[i];
@@ -490,6 +559,7 @@ function drawGenomePanel() {
   }
   const x = 20;
   const y0 = H - 22 - GENES.length * 13;
+  backing(x - 8, y0 - (study ? 38 : 22), 160, GENES.length * 13 + (study ? 50 : 34));
   text(`THE VOID  ·  GEN ${pool.generation}`, x, y0 - 8, 10, 'hsla(320, 100%, 78%, 0.75)', 'left', 700, DISPLAY, 2);
   if (study) {
     text(`STUDYING YOU: ${THREAT_LABEL[study.threat]} ${Math.round(study.share * 100)}%`, x, y0 - 24, 10, `hsla(${(G.clock * 40) % 30 + 340}, 100%, 70%, ${0.6 + 0.3 * Math.sin(G.clock * 3)})`, 'left', 700, UI, 1);
@@ -554,23 +624,34 @@ function drawDeath() {
   h.fillRect(0, 0, W, H);
   h.shadowColor = 'hsl(0, 100%, 50%)';
   h.shadowBlur = 24;
-  text('SNUFFED OUT', W / 2, H / 2 - 92, Math.min(46, W / 10), '#fff', 'center', 900, DISPLAY, 6);
+  text('SNUFFED OUT', W / 2, H / 2 - 118, Math.min(46, W / 10), '#fff', 'center', 900, DISPLAY, 6);
   h.shadowBlur = 0;
-  text(`${G.score.toLocaleString()} points${G.score >= G.best && G.score > 0 ? '  ·  new best!' : ''}`, W / 2, H / 2 - 52, 20, `hsl(${G.hue}, 100%, 78%)`, 'center', 700);
+  text(`${G.score.toLocaleString()} points${G.score >= G.best && G.score > 0 ? '  ·  new best!' : ''}`, W / 2, H / 2 - 78, 20, `hsl(${G.hue}, 100%, 78%)`, 'center', 700);
   const s = sector();
   const n = G.evolutions;
-  text(`reached ${s.name}${G.loop ? ` (ascension ${roman(G.loop)})` : ''}  ·  ${G.apexes} apex${G.apexes === 1 ? '' : 'es'} slain  ·  ${G.kills} voids`, W / 2, H / 2 - 22, 14, 'rgba(255,255,255,0.65)', 'center', 400);
-  text(`you fell as a ${TIERS[tier()].name.toLowerCase()} with ${n} mutation${n === 1 ? '' : 's'}`, W / 2, H / 2, 14, 'rgba(255,255,255,0.65)', 'center', 400);
-  text(`the void is now generation ${pool.generation}. it will remember this.`, W / 2, H / 2 + 24, 13, 'hsla(320, 100%, 75%, 0.85)', 'center', 400);
+  const where = `${s.name}${G.loop ? ` (ascension ${roman(G.loop)})` : ''}`;
+  text(G.killedBy ? `taken by ${G.killedBy} in ${where}` : `fell in ${where}`, W / 2, H / 2 - 50, 15, 'hsl(8, 100%, 72%)', 'center', 600);
+  const mins = Math.floor(G.time / 60);
+  const secs = String(Math.floor(G.time % 60)).padStart(2, '0');
+  const narrowDeath = W < 640;
+  const stats = [`${mins}:${secs}`, `${G.apexes} apex${G.apexes === 1 ? '' : 'es'}`, `${G.kills} voids`, `best streak ${G.bestStreak}`, `max combo x${G.maxCombo}`];
+  if (narrowDeath) {
+    text(stats.slice(0, 3).join('  ·  '), W / 2, H / 2 - 24, 13, 'rgba(255,255,255,0.65)', 'center', 400);
+    text(stats.slice(3).join('  ·  '), W / 2, H / 2 - 6, 13, 'rgba(255,255,255,0.65)', 'center', 400);
+  } else {
+    text(stats.join('  ·  '), W / 2, H / 2 - 24, 14, 'rgba(255,255,255,0.65)', 'center', 400);
+  }
+  text(`you fell as a ${TIERS[tier()].name.toLowerCase()} with ${n} mutation${n === 1 ? '' : 's'}`, W / 2, H / 2 + (narrowDeath ? 14 : 0), 14, 'rgba(255,255,255,0.65)', 'center', 400);
+  text(`the void is now generation ${pool.generation}. it will remember this.`, W / 2, H / 2 + (narrowDeath ? 36 : 24), Math.min(13, W / 32), 'hsla(320, 100%, 75%, 0.85)', 'center', 400);
 
   // the stardust payout counts up
   const shown = Math.floor(G.runDust * clamp((G.deadTimer - 0.7) / 1.2, 0, 1));
   gem(W / 2 - 70, H / 2 + 62, 9, 'hsl(48, 100%, 70%)');
   text(`+${shown} stardust`, W / 2 - 54, H / 2 + 69, 20, 'hsl(48, 100%, 80%)', 'left', 700, DISPLAY);
   text(`${meta.dust.toLocaleString()} total`, W / 2, H / 2 + 94, 12, 'rgba(255,255,255,0.45)', 'center', 500);
-  if (G.deadTimer > 0.8) {
-    button(deathForgeRect(), 'STARFORGE  (F)', 48);
-    text('CLICK ANYWHERE TO RELIGHT', W / 2, H / 2 + 200, 12, 'rgba(255,255,255,0.6)', 'center', 700, DISPLAY, 4);
+  if (G.deadTimer > DEATH_HOLD) {
+    button(deathForgeRect(), pointer.touch ? 'STARFORGE' : 'STARFORGE  (F)', 48);
+    text(pointer.touch ? 'TAP ANYWHERE TO RELIGHT' : 'CLICK ANYWHERE TO RELIGHT', W / 2, H / 2 + 200, 12, 'rgba(255,255,255,0.6)', 'center', 700, DISPLAY, 4);
   }
   h.globalAlpha = 1;
 }
@@ -581,20 +662,47 @@ function drawBanner() {
   const { W, H } = view;
   h.globalAlpha = clamp(Math.min(b.life, b.maxLife - b.life) * 3, 0, 1);
   const y = H * (b.big ? 0.3 : 0.24);
+  const spacing = b.big ? 8 : 4;
+  // long callouts ("THE VOID EVOLVED EVASION") shrink to fit a phone instead of running off both edges
+  const size = fitSize(b.text, W - 32, b.big ? 34 : 24, 11, 900, DISPLAY, spacing);
   h.shadowColor = `hsl(${b.hue}, 100%, 55%)`;
   h.shadowBlur = 22;
-  text(b.text, W / 2, y, Math.min(b.big ? 34 : 24, W / 18), `hsl(${b.hue}, 100%, 84%)`, 'center', 900, DISPLAY, b.big ? 8 : 4);
+  text(b.text, W / 2, y, size, `hsl(${b.hue}, 100%, 84%)`, 'center', 900, DISPLAY, spacing);
   h.shadowBlur = 0;
-  if (b.sub) text(b.sub, W / 2, y + 28, 15, 'rgba(255,255,255,0.7)', 'center', 400, UI, 1);
+  if (b.sub) text(b.sub, W / 2, y + 28, fitSize(b.sub, W - 32, 15, 10, 400, UI, 1), 'rgba(255,255,255,0.7)', 'center', 400, UI, 1);
   h.globalAlpha = 1;
 }
 
 function drawPause() {
   const { W, H } = view;
-  h.fillStyle = 'rgba(3, 3, 9, 0.6)';
+  h.fillStyle = 'rgba(3, 3, 9, 0.78)';
   h.fillRect(0, 0, W, H);
-  text('PAUSED', W / 2, H / 2, 36, '#fff', 'center', 900, DISPLAY, 10);
-  text('press P or click to resume', W / 2, H / 2 + 32, 14, 'rgba(255,255,255,0.6)', 'center', 400);
+  const held = MUTATIONS.filter((m) => G.levels[m.id] > 0);
+  const cols = W >= 900 ? 2 : 1;
+  const colW = Math.min(380, (W - 48 - (cols - 1) * 24) / cols);
+  const rowH = 54;
+  const rows = Math.ceil(held.length / cols);
+  const fit = Math.max(0, Math.floor((H - 260) / rowH));
+  const shownRows = Math.min(rows, fit);
+  const blockH = shownRows * rowH;
+  const titleY = Math.max(70, H / 2 - blockH / 2 - 40);
+  text('PAUSED', W / 2, titleY, 36, '#fff', 'center', 900, DISPLAY, 10);
+  text(pointer.touch ? 'tap to resume' : 'press P or click to resume', W / 2, titleY + 30, 14, 'rgba(255,255,255,0.6)', 'center', 400);
+  if (!held.length) return;
+  const x0 = W / 2 - (cols * colW + (cols - 1) * 24) / 2;
+  const y0 = titleY + 70;
+  text('YOUR BUILD', W / 2, y0 - 12, 10, 'rgba(255,255,255,0.45)', 'center', 700, DISPLAY, 4);
+  held.slice(0, shownRows * cols).forEach((m, i) => {
+    const x = x0 + (i % cols) * (colW + 24);
+    const y = y0 + Math.floor(i / cols) * rowH;
+    const lvl = G.levels[m.id];
+    h.globalCompositeOperation = 'lighter';
+    drawGlow(h, x + 10, y + 14, 12, m.hue, 65);
+    h.globalCompositeOperation = 'source-over';
+    text(`${m.name.toUpperCase()} ${roman(lvl)}`, x + 28, y + 12, 12, m.requires ? 'hsl(45, 100%, 72%)' : `hsl(${m.hue}, 100%, 78%)`, 'left', 700, DISPLAY, 1);
+    wrap(m.desc(lvl), colW - 30, 12).slice(0, 2).forEach((line, k) => text(line, x + 28, y + 29 + k * 15, 12, 'rgba(255,255,255,0.62)', 'left', 400));
+  });
+  if (shownRows < rows) text(`+${held.length - shownRows * cols} more`, W / 2, y0 + blockH + 8, 11, 'rgba(255,255,255,0.4)', 'center', 600);
 }
 
 function drawReticle() {
@@ -618,14 +726,19 @@ export function drawHud(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
   }
   h.globalAlpha = 1;
 
-  if (G.state === 'title' || (G.state === 'forge' && G.forgeFrom === 'title')) {
-    drawTitle();
-    drawBanner();
-    if (G.state === 'forge') drawForge();
+  // the forge stands alone: whatever screen opened it would only show through as clutter
+  if (G.state === 'forge') {
+    drawForge();
     drawReticle();
     return;
   }
-  if (sector().hazard === 'dark' && G.state !== 'warp') drawEyes(ox, oy);
+  if (G.state === 'title') {
+    drawTitle();
+    drawBanner();
+    drawReticle();
+    return;
+  }
+  if (isDark() && G.state !== 'warp') drawEyes(ox, oy);
   if (G.state === 'play') drawPhaseArc(ox, oy);
   drawTopLeft();
   drawTopCenter();
@@ -633,11 +746,11 @@ export function drawHud(ctx: CanvasRenderingContext2D, ox: number, oy: number) {
   drawBottomCenter();
   drawMutationList();
   drawGenomePanel();
-  drawAnnounce();
-  drawBanner();
+  // banners freeze under the card and pause overlays, so they'd sit behind those titles
+  if (!G.paused) drawAnnounce();
+  if (!G.paused && G.state !== 'evolve') drawBanner();
   if (G.state === 'evolve') drawEvolve();
-  if (G.state === 'dead' || G.state === 'forge') drawDeath();
-  if (G.state === 'forge') drawForge();
+  if (G.state === 'dead') drawDeath();
   if (G.paused) drawPause();
   drawReticle();
 }

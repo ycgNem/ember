@@ -19,6 +19,8 @@ export function updatePlayer(dt: number) {
   }
 
   // near-instant exponential follow: ~30ms to close most of the gap, no spring overshoot
+  player.px = player.x;
+  player.py = player.y;
   const target = gravityTarget(pointer.x, pointer.y);
   const follow = 1 - Math.exp(-dt * 34);
   const nx = player.x + (target.x - player.x) * follow;

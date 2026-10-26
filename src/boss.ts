@@ -7,13 +7,17 @@ import { startWarp } from './flow';
 import { addShake, announce, banner, burst, hitstop, popup, punch, shock } from './fx';
 import { GENES, GENE_ADJ, GENE_HUE, GENE_NOUN, express, type Gene } from './genome';
 import { drawGlow } from './glow';
-import { G, budget, player, playerRadius, pool, tailLife, view, wake, type Boss, type BossMove } from './state';
+import { G, budget, player, playerRadius, pool, sweptDist, tailLife, view, wake, type Boss, type BossMove } from './state';
 import { TAU, clamp, pick, rand } from './util';
 
 const SLAM_R = 230;
 const TETHER_R = 380;
 const AIM_TIME = 0.8;
 const SLAM_TIME = 1.0;
+/** Health fraction below which an apex enrages. */
+const ENRAGE_AT = 0.35;
+/** A blinking apex never reappears closer than this to the wisp. */
+const BLINK_CLEARANCE = 280;
 
 /** Genes that grant an active attack; armor, mitosis and evasion are passive traits instead. */
 const ACTIVE: Partial<Record<Gene, BossMove>> = {
@@ -41,7 +45,8 @@ export function spawnBoss() {
     const g = pick(GENES);
     if (!genes.includes(g)) genes.push(g);
   }
-  const maxHp = Math.round((50 + 25 * G.sector) * (1 + 0.6 * G.loop));
+  // it grows with your build, so a stacked wisp can't delete it before it acts
+  const maxHp = Math.round((50 + 25 * G.sector) * (1 + 0.6 * G.loop) * (1 + 0.05 * G.evolutions));
   const name = `The ${GENE_ADJ[genes[1]]} ${GENE_NOUN[genes[0]]}`;
   G.boss = {
     x: view.W / 2, y: -140, vx: 0, vy: 0, r: genes.includes('size') ? 66 : 50,
@@ -51,7 +56,7 @@ export function spawnBoss() {
     plates: genes.includes('armor') ? 6 : 0, plateRegen: 0,
     hitCd: 0, flash: 0, blinkCd: 0, enter: 0,
     splitAt: genes.includes('split') ? [0.66, 0.33] : [],
-    dying: 0, alpha: 1,
+    dying: 0, alpha: 1, enraged: false,
   };
   banner(name.toUpperCase(), 'an apex has evolved to hunt you', GENE_HUE[genes[0]], true);
   blip(45, 2.2, 'sawtooth', 0.16, 2);
@@ -90,7 +95,17 @@ function startMove(b: Boss, m: BossMove) {
 function endMove(b: Boss, cd: number) {
   b.move = 'idle';
   b.moveTime = 0;
-  b.cd = cd * Math.max(0.55, 1 - G.loop * 0.15);
+  b.cd = cd * Math.max(0.55, 1 - G.loop * 0.15) * (b.enraged ? 0.6 : 1);
+}
+
+function enrage(b: Boss) {
+  b.enraged = true;
+  announce('ENRAGED', 0, 6);  // the announcer, not a banner: it can't wait behind the apex's own entrance
+  shock(b.x, b.y, 320, 26);
+  burst(b.x, b.y, 0, 50, 420, 8);
+  addShake(12);
+  blip(55, 1.2, 'sawtooth', 0.14, 0.5);
+  blip(82, 1.2, 'square', 0.06, 0.6, 0.08);
 }
 
 function fireVolley(b: Boss) {
@@ -137,7 +152,7 @@ export function updateBoss(dt: number) {
   const dx = player.x - b.x;
   const dy = player.y - b.y;
   const d = Math.hypot(dx, dy) || 1;
-  let speed = 70 + 18 * G.sector + 30 * G.loop;
+  let speed = (70 + 18 * G.sector + 30 * G.loop) * (b.enraged ? 1.3 : 1);
   b.moveTime += dt;
   b.alpha += ((b.move === 'vanish' ? 0.06 : 1) - b.alpha) * Math.min(1, dt * 5);
 
@@ -165,7 +180,7 @@ export function updateBoss(dt: number) {
     case 'slam':
       speed = 0;
       if (b.moveTime > SLAM_TIME) {
-        if (d < SLAM_R) damagePlayer(null, true);  // too big to phase through
+        if (d < SLAM_R) damagePlayer(`${b.name}'s slam`, null, true);  // too big to phase through
         shock(b.x, b.y, SLAM_R + 80, 30);
         burst(b.x, b.y, b.hue, 70, 500, 9);
         addShake(14);
@@ -213,7 +228,7 @@ export function updateBoss(dt: number) {
   if (b.x < m || b.x > view.W - m) { b.x = clamp(b.x, m, view.W - m); b.vx *= -0.5; }
   if (b.y < m || b.y > view.H - m) { b.y = clamp(b.y, m, view.H - m); b.vy *= -0.5; }
 
-  if (d < b.r * 0.85 + playerRadius()) damagePlayer(null, b.genes.includes('pierce'));
+  if (sweptDist(b) < b.r * 0.85 + playerRadius()) damagePlayer(b.move === 'dash' ? `${b.name}'s charge` : b.name, null, b.genes.includes('pierce'));
 
   // your companions chip away at it
   if (b.hitCd <= 0) {
@@ -232,7 +247,8 @@ export function updateBoss(dt: number) {
 
 export function damageBoss(amount: number, x: number, y: number, pierce = false, quiet = false) {
   const b = G.boss;
-  if (!b || b.dying > 0 || b.enter < 1) return;
+  // a ring or rift still running after you die mustn't slay the apex and warp you out of the death screen
+  if (!b || b.dying > 0 || b.enter < 1 || G.state !== 'play') return;
   if (b.plates > 0 && !pierce) {
     b.plates--;
     b.plateRegen = 0;
@@ -255,6 +271,7 @@ export function damageBoss(amount: number, x: number, y: number, pierce = false,
     banner('IT DIVIDES', 'three champions tear free', b.hue);
     shock(b.x, b.y, 260, 24);
   }
+  if (!b.enraged && b.hp > 0 && b.hp / b.maxHp < ENRAGE_AT) enrage(b);
   if (b.hp <= 0) {
     b.hp = 0;
     b.dying = 0.001;
@@ -271,8 +288,20 @@ export function bossOnPulse(x: number, y: number, maxR: number) {
   if (!b || b.dying > 0 || b.enter < 1 || !b.genes.includes('evasion') || b.blinkCd > 0) return;
   if (Math.hypot(b.x - x, b.y - y) > maxR + b.r || Math.random() > 0.55) return;
   burst(b.x, b.y, b.hue, 30, 300, 7);
-  b.x = clamp(view.W - player.x + rand(-120, 120), b.r, view.W - b.r);
-  b.y = clamp(view.H - player.y + rand(-120, 120), b.r, view.H - b.r);
+  // reappear across the field, never on top of you: near the centre the mirrored spot is right beside you
+  let bx = b.x;
+  let by = b.y;
+  let best = -1;
+  for (let i = 0; i < 12; i++) {
+    const tx = clamp(i === 0 ? view.W - player.x : rand(0, view.W), b.r, view.W - b.r);
+    const ty = clamp(i === 0 ? view.H - player.y : rand(0, view.H), b.r, view.H - b.r);
+    const gap = Math.hypot(tx - player.x, ty - player.y) - b.r;
+    if (gap >= BLINK_CLEARANCE) { bx = tx; by = ty; break; }
+    if (gap > best) { best = gap; bx = tx; by = ty; }
+  }
+  b.x = bx;
+  b.y = by;
+  b.vx = b.vy = 0;
   b.blinkCd = 2.5;
   shock(b.x, b.y, 160, 16);
   blip(1500, 0.15, 'sine', 0.06, 0.4);
@@ -378,6 +407,7 @@ export function drawBoss(c: CanvasRenderingContext2D) {
 
   c.globalCompositeOperation = 'lighter';
   drawGlow(c, x, y, r * 3.2, b.hue, 50, 0.6);
+  if (b.enraged) drawGlow(c, x, y, r * 2.8, 0, 50, 0.7 + 0.3 * Math.sin(G.clock * 14));
   if (b.move === 'barrage' || b.move === 'tether') drawGlow(c, x, y, r * 1.6, b.hue, 70, 0.5 + 0.3 * Math.sin(G.clock * 20));
   c.globalCompositeOperation = 'source-over';
 
@@ -397,7 +427,7 @@ export function drawBoss(c: CanvasRenderingContext2D) {
   grad.addColorStop(1, `hsl(${b.hue}, 80%, 22%)`);
   c.fillStyle = grad;
   c.fill();
-  c.strokeStyle = b.flash > 0 ? '#fff' : `hsl(${b.hue}, 100%, 62%)`;
+  c.strokeStyle = b.flash > 0 ? '#fff' : b.enraged ? `hsl(${(b.hue + Math.sin(G.clock * 14) * 20 + 360) % 360}, 100%, 62%)` : `hsl(${b.hue}, 100%, 62%)`;
   c.lineWidth = b.flash > 0 ? 4 : 2;
   c.stroke();
 
@@ -456,7 +486,7 @@ export function drawBoss(c: CanvasRenderingContext2D) {
   if (blink > 0.5) {
     const ix = x + (dx / d) * r * 0.12;
     const iy = y + (dy / d) * r * 0.08;
-    c.fillStyle = `hsl(${b.hue}, 100%, 45%)`;
+    c.fillStyle = b.enraged ? 'hsl(0, 100%, 50%)' : `hsl(${b.hue}, 100%, 45%)`;
     c.beginPath();
     c.arc(ix, iy, r * 0.2, 0, TAU);
     c.fill();
