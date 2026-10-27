@@ -11,6 +11,7 @@ import { spawnBoss, updateBoss } from './boss';
 import { pulse, updateBullets, updateCompanions, updateEffects, updateEnemies } from './combat';
 import { DEATH_HOLD, choose, closeForge, openForge, reroll, resetRun, startWarp, updatePlay, updateWarp } from './flow';
 import { banner } from './fx';
+import { glows } from './glow';
 import { HORIZON_R, horizonCenter, updateHazards } from './hazards';
 import { deathForgeRect, drawHud, forgeLayout, hoveredCard, noteBuy, pointerIn, rerollRect, titleForgeRect } from './hud';
 import { addFever, updateHype } from './hype';
@@ -20,7 +21,7 @@ import { seedDust, updateDust, updatePlayer } from './player';
 import { Post, type PostParams } from './post';
 import { renderWorld } from './render';
 import { G, WARP_TIME, isDark, player, pointer, pool, sector, store, tier, view, wake, wakeLife } from './state';
-import { rand } from './util';
+import { rand, retain } from './util';
 
 // ---------- canvases ----------
 // world (offscreen 2D, trails) -> gl (post-processing, visible) -> hud (2D, crisp, on top)
@@ -43,12 +44,10 @@ const post = Post.create(glCanvas);
 // without WebGL2, fall back to compositing the world straight onto a flat sky
 const flat = post ? null : glCanvas.getContext('2d');
 
-function resize() {
+function sizeCanvases() {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  // the world and post passes run at up to 1.5x; the HUD gets full density for crisp text
-  const worldDpr = Math.min(dpr, 1.5);
-  view.W = window.innerWidth;
-  view.H = window.innerHeight;
+  // the world and post passes run at up to 1.5x (less if adaptive resolution steps in); the HUD gets full density for crisp text
+  const worldDpr = Math.min(dpr, 1.5) * view.scale;
   const size = (c: HTMLCanvasElement, s: number) => {
     c.width = Math.floor(view.W * s);
     c.height = Math.floor(view.H * s);
@@ -59,7 +58,13 @@ function resize() {
   world.setTransform(worldDpr, 0, 0, worldDpr, 0, 0);
   hud.setTransform(dpr, 0, 0, dpr, 0, 0);
   flat?.setTransform(worldDpr, 0, 0, worldDpr, 0, 0);
-  post?.resize(glCanvas.width, glCanvas.height);
+  post?.resize(glCanvas.width, glCanvas.height, Math.ceil(view.W / 2), Math.ceil(view.H / 2));
+}
+
+function resize() {
+  view.W = window.innerWidth;
+  view.H = window.innerHeight;
+  sizeCanvases();
   seedDust();
 }
 window.addEventListener('resize', resize);
@@ -264,14 +269,14 @@ function update(rawDt: number) {
     p.y += p.vy * ambient;
     p.life -= ambient;
   }
-  G.particles = G.particles.filter((p) => p.life > 0);
+  retain(G.particles, (p) => p.life > 0);
   if (G.particles.length > 1800) G.particles.splice(0, G.particles.length - 1800);
 
   for (const p of G.popups) {
     p.y -= 40 * rawDt;
     p.life -= rawDt;
   }
-  G.popups = G.popups.filter((p) => p.life > 0);
+  retain(G.popups, (p) => p.life > 0);
 
   if (G.banners.length && G.state !== 'evolve') {
     G.banners[0].life -= rawDt;
@@ -352,12 +357,12 @@ function postParams(shakeX: number, shakeY: number, dt: number): PostParams {
 }
 
 function render(dt: number) {
-  renderWorld(world);
+  renderWorld(world, post !== null);
   const shake = G.shake * (G.calm ? 0.25 : 1);
   const sx = shake > 0.3 ? rand(-shake, shake) : 0;
   const sy = shake > 0.3 ? rand(-shake, shake) : 0;
   if (post) {
-    post.render(worldCanvas, postParams(sx, sy, dt));
+    post.render(worldCanvas, postParams(sx, sy, dt), glows);
   } else if (flat) {
     const [r, g, b] = sector().palette[0];
     flat.fillStyle = `rgb(${r * 255}, ${g * 255}, ${b * 255})`;
@@ -373,10 +378,73 @@ if (import.meta.env.DEV) {
   Object.assign(window, { ember: { G, player, view, pool, meta, warp: startWarp, boss: spawnBoss, fever: () => addFever(1) } });
 }
 
+// ---------- adaptive resolution ----------
+// A PC that can't hold ~52fps renders the world and post passes at a lower scale; the HUD stays
+// sharp. A step down that doesn't speed anything up means the bottleneck is elsewhere, so it is
+// undone and adapting stops. After a smooth stretch it tries a step back up, waiting twice as
+// long after each try that didn't hold.
+
+const SCALES = [1, 0.85, 0.72, 0.6];
+const WINDOW = 90;      // frames per verdict
+const SLOW_MS = 19;
+const SMOOTH_MS = 17.5;
+let scaleStep = 0;
+let frameMs: number[] = [];
+let judging = 0;        // median frame time before the last step down, until we see whether it helped
+let smoothFor = 0;      // seconds of smooth frames at a reduced scale
+let retryAfter = 20;
+let adaptLocked = false;
+let settle = 0;
+
+function setScale(next: number) {
+  scaleStep = next;
+  view.scale = SCALES[next];
+  sizeCanvases();
+  frameMs = [];
+  settle = 0.5;
+}
+
+function adapt(interval: number) {
+  if (adaptLocked || G.paused || document.hidden || interval > 0.1) return;
+  if (settle > 0) {
+    settle -= interval;
+    return;
+  }
+  frameMs.push(interval * 1000);
+  if (frameMs.length < WINDOW) return;
+  const median = frameMs.sort((a, b) => a - b)[WINDOW >> 1];
+  frameMs = [];
+  if (judging) {
+    const helped = median < judging * 0.92;
+    judging = 0;
+    if (!helped) {
+      adaptLocked = true;
+      setScale(scaleStep - 1);
+    }
+    return;
+  }
+  if (median > SLOW_MS && scaleStep < SCALES.length - 1) {
+    judging = median;
+    smoothFor = 0;
+    setScale(scaleStep + 1);
+  } else if (scaleStep > 0 && median < SMOOTH_MS) {
+    smoothFor += (WINDOW * median) / 1000;
+    if (smoothFor >= retryAfter) {
+      smoothFor = 0;
+      retryAfter *= 2;
+      setScale(scaleStep - 1);
+    }
+  } else {
+    smoothFor = 0;
+  }
+}
+
 let last = performance.now();
 function frame(now: number) {
-  const dt = Math.min(0.033, (now - last) / 1000);
+  const interval = (now - last) / 1000;
+  const dt = Math.min(0.033, interval);
   last = now;
+  adapt(interval);
   update(dt);
   render(dt);
   requestAnimationFrame(frame);

@@ -21,6 +21,19 @@ export function segmentIntersect(a: Pt, b: Pt, c: Pt, d: Pt): Pt | null {
   return { x: a.x + t * rx, y: a.y + t * ry };
 }
 
+/**
+ * Keeps only the items `keep` accepts, compacting the array in place: the per-frame
+ * culls run on hundreds of particles, and a fresh array each time is needless garbage.
+ */
+export function retain<T>(arr: T[], keep: (item: T) => boolean): void {
+  let n = 0;
+  for (let i = 0; i < arr.length; i++) {
+    const item = arr[i];
+    if (keep(item)) arr[n++] = item;
+  }
+  arr.length = n;
+}
+
 /** Distance from p to the segment a-b. */
 export function segmentDistance(p: Pt, a: Pt, b: Pt): number {
   const dx = b.x - a.x;

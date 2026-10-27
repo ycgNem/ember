@@ -13,7 +13,7 @@ import {
   scoreMult, sector, stasisFactor, stasisRadius, sweptDist, tailLife, tier, view, wake, wakeCooldownTime,
   type Bullet, type Enemy, type RingKind, type Spark, type SparkKind,
 } from './state';
-import { TAU, pointInPolygon, rand, type Pt } from './util';
+import { TAU, pointInPolygon, rand, retain, type Pt } from './util';
 
 const MAX_ENEMIES = 80;
 export const RING_SPEED = 1100;
@@ -403,7 +403,7 @@ export function incinerate(poly: Pt[]) {
   for (const b of G.bullets) if (!b.dead && pointInPolygon(b, poly)) b.dead = true;
   for (const j of G.jellies) if (!j.dead && pointInPolygon(j, poly)) popJelly(j);
   if (G.boss && pointInPolygon(G.boss, poly)) damageBoss(G.boss.genes.includes('ward') ? 5 : 18, G.boss.x, G.boss.y, true);
-  G.sparks = G.sparks.filter((s) => {
+  retain(G.sparks, (s) => {
     if (!pointInPolygon(s, poly)) return true;
     collect(s);
     return false;
@@ -475,7 +475,7 @@ export function updateSparks(dt: number) {
   const collectR = 24 + tier();
   const eaters: Pt[] = [player, ...G.echoes];
   if (G.mirror) eaters.push(G.mirror);
-  G.sparks = G.sparks.filter((s) => {
+  retain(G.sparks, (s) => {
     s.age += dt;
     if (s.kind === 'mote' && s.age > 6) return false;
     if (s.vy) {
@@ -662,7 +662,7 @@ export function updateBullets(dt: number) {
       }
     }
   }
-  G.bullets = G.bullets.filter((b) => !b.dead);
+  retain(G.bullets, (b) => !b.dead);
 }
 
 export function updateEffects(dt: number) {
@@ -706,10 +706,10 @@ export function updateEffects(dt: number) {
       damageBoss(RING_DAMAGE[r.kind], r.x, r.y, r.kind === 'nova' || frozen);
     }
   }
-  G.rings = G.rings.filter((r) => r.r < r.maxR * 1.12);
+  retain(G.rings, (r) => r.r < r.maxR * 1.12);
 
   for (const w of G.wells) w.life -= dt;
-  G.wells = G.wells.filter((w) => w.life > 0);
+  retain(G.wells, (w) => w.life > 0);
 
   for (const s of G.shards) {
     s.life -= dt;
@@ -741,25 +741,25 @@ export function updateEffects(dt: number) {
     s.x += s.vx * dt;
     s.y += s.vy * dt;
   }
-  G.shards = G.shards.filter((s) => s.life > 0);
+  retain(G.shards, (s) => s.life > 0);
 
   for (const l of G.loops) l.life -= dt;
-  G.loops = G.loops.filter((l) => l.life > 0);
+  retain(G.loops, (l) => l.life > 0);
   for (const b of G.bolts) b.life -= dt;
-  G.bolts = G.bolts.filter((b) => b.life > 0);
+  retain(G.bolts, (b) => b.life > 0);
   for (const s of G.shocks) {
     s.r += s.speed * dt;
     s.life -= dt;
   }
-  G.shocks = G.shocks.filter((s) => s.life > 0);
+  retain(G.shocks, (s) => s.life > 0);
 
   if (G.spawnQueue.length) {
     G.enemies.push(...G.spawnQueue);
     G.spawnQueue = [];
   }
-  G.enemies = G.enemies.filter((e) => !e.dead);
+  retain(G.enemies, (e) => !e.dead);
   if (G.state === 'dead') {
     const { W, H } = view;
-    G.enemies = G.enemies.filter((e) => e.x > -200 && e.x < W + 200 && e.y > -200 && e.y < H + 200);
+    retain(G.enemies, (e) => e.x > -200 && e.x < W + 200 && e.y > -200 && e.y < H + 200);
   }
 }

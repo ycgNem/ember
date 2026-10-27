@@ -2,7 +2,7 @@
 // this layer is transparent: glows add light, void bodies are dark silhouettes.
 
 import { drawBoss, drawBossTelegraphs } from './boss';
-import { drawGlow } from './glow';
+import { batchGlows, coverGlows, drawGlow, glowLayer } from './glow';
 import { drawHazardsBody, drawHazardsGlow, drawHazardsTop } from './hazards';
 import { G, player, sector, stasisRadius, tier, view, wake, wakeLife, type Enemy } from './state';
 import { TAU, clamp, type Pt } from './util';
@@ -22,14 +22,12 @@ function tracePoly(poly: readonly Pt[]) {
 
 function drawDust() {
   const h = sector().hue;
-  // three depth bands: far dust is small and dim, near dust is larger and brighter
+  // three depth bands: far dust is small and dim, near dust is larger and brighter.
+  // (Plain fillRects: Chrome merges them, while one many-rect path measured far slower.)
   for (let band = 0; band < 3; band++) {
     const size = 1 + band * 0.9;
     c.fillStyle = `hsla(${h}, 70%, ${65 + band * 8}%, ${0.18 + band * 0.14})`;
-    for (const d of G.dust) {
-      if (Math.min(2, Math.floor(d.z * 3)) !== band) continue;
-      c.fillRect(d.x, d.y, size, size);
-    }
+    for (const d of G.dust) if (d.band === band) c.fillRect(d.x, d.y, size, size);
   }
 }
 
@@ -124,6 +122,24 @@ function drawRings() {
   }
 }
 
+// A void's membrane gradient lives in its own rotated frame, so one gradient per size and hue serves every frame.
+const membranes = new Map<number, CanvasGradient>();
+
+function membrane(r: number, hue: number): CanvasGradient {
+  const rr = Math.max(1, Math.round(r));
+  const key = rr * 360 + hue;
+  let g = membranes.get(key);
+  if (!g) {
+    if (membranes.size > 400) membranes.clear();
+    g = c.createRadialGradient(0, 0, rr * 0.15, 0, 0, rr * 1.3);
+    g.addColorStop(0, '#000');
+    g.addColorStop(0.6, '#0b0314');
+    g.addColorStop(1, `hsl(${hue}, 85%, 24%)`);
+    membranes.set(key, g);
+  }
+  return g;
+}
+
 function drawEnemy(e: Enemy) {
   const ph = e.ph;
   const vis = enemyVisibility(e);
@@ -166,11 +182,7 @@ function drawEnemy(e: Enemy) {
     else c.lineTo(Math.cos(a) * rr, Math.sin(a) * rr);
   }
   c.closePath();
-  const grad = c.createRadialGradient(0, 0, e.r * 0.15, 0, 0, e.r * 1.3);
-  grad.addColorStop(0, '#000');
-  grad.addColorStop(0.6, '#0b0314');
-  grad.addColorStop(1, `hsl(${e.hue}, 85%, 24%)`);
-  c.fillStyle = grad;
+  c.fillStyle = membrane(e.r, e.hue);
   c.fill();
   c.strokeStyle = `hsl(${e.hue}, 100%, 66%)`;
   c.lineWidth = e.elite ? 2.2 : 1.4;
@@ -197,17 +209,21 @@ function drawEnemy(e: Enemy) {
   glow(e.x, e.y, e.r * 0.75 * beat, e.hue, 60, 0.75);
   c.globalCompositeOperation = 'source-over';
 
-  // segmented armor shells
-  c.strokeStyle = 'hsla(275, 100%, 72%, 0.8)';
-  c.lineWidth = 1.6;
-  for (let i = 0; i < e.shells; i++) {
-    const rot = e.phase * (i % 2 ? -0.5 : 0.5);
-    for (let k = 0; k < 3; k++) {
-      const a0 = rot + (k * TAU) / 3;
-      c.beginPath();
-      c.arc(e.x, e.y, e.r * 1.35 + i * 5, a0, a0 + TAU / 3 - 0.5);
-      c.stroke();
+  // segmented armor shells, all in one path
+  if (e.shells > 0) {
+    c.strokeStyle = 'hsla(275, 100%, 72%, 0.8)';
+    c.lineWidth = 1.6;
+    c.beginPath();
+    for (let i = 0; i < e.shells; i++) {
+      const rot = e.phase * (i % 2 ? -0.5 : 0.5);
+      const rr = e.r * 1.35 + i * 5;
+      for (let k = 0; k < 3; k++) {
+        const a0 = rot + (k * TAU) / 3;
+        c.moveTo(e.x + Math.cos(a0) * rr, e.y + Math.sin(a0) * rr);
+        c.arc(e.x, e.y, rr, a0, a0 + TAU / 3 - 0.5);
+      }
     }
+    c.stroke();
   }
 
   // mitosis: twin nuclei
@@ -245,6 +261,7 @@ function drawEnemy(e: Enemy) {
     c.beginPath();
     c.arc(e.x + (dx / d) * er * 0.45, e.y + (dy / d) * er * 0.45, er * 0.5, 0, TAU);
     c.fill();
+    coverGlows(c, e.x, e.y, er);
   }
 
   // warded: a fireproof hex shield shimmering around it
@@ -402,15 +419,18 @@ function drawPlayer() {
     c.beginPath();
     c.arc(x, y, core * 0.7, 0, TAU);
     c.fill();
+    coverGlows(c, x, y, core * 0.7);
     c.globalCompositeOperation = 'lighter';
   } else {
     glow(x, y, core, hue, 92, a);
   }
 }
 
-export function renderWorld(ctx: CanvasRenderingContext2D) {
+/** `gpuGlows`: hand the glows to Post's GPU layers instead of drawing them on this canvas. */
+export function renderWorld(ctx: CanvasRenderingContext2D, gpuGlows: boolean) {
   c = ctx;
   const { W, H } = view;
+  batchGlows(gpuGlows ? c : null);  // glows from here to the bodies pass sit behind them
 
   // fade the previous frame's alpha instead of clearing, so everything leaves trails
   // (erasing alpha avoids the gray ghosts that painting a translucent dark rect leaves)
@@ -469,6 +489,7 @@ export function renderWorld(ctx: CanvasRenderingContext2D) {
       c.stroke();
     }
   }
+  glowLayer('body');  // a void's nucleus shines on top of its own dark body
   for (const e of G.enemies) drawEnemy(e);
   for (const b of G.bullets) {
     c.fillStyle = '#0a0410';
@@ -479,7 +500,9 @@ export function renderWorld(ctx: CanvasRenderingContext2D) {
     c.lineWidth = 1.5;
     c.stroke();
   }
+  glowLayer('back');  // the apex's halo sits behind its body
   drawBoss(c);
+  glowLayer('front');
 
   c.globalCompositeOperation = 'lighter';
   drawHazardsTop(c);

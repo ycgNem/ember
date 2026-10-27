@@ -5,9 +5,9 @@ import { blip } from './audio';
 import { damageBoss } from './boss';
 import { damagePlayer, dropSpark, killEnemy } from './combat';
 import { addShake, burst, shock } from './fx';
-import { drawGlow } from './glow';
+import { drawGlow, glowLayer } from './glow';
 import { G, player, playerRadius, sector, sweptDist, view, type Jelly, type Rift } from './state';
-import { TAU, clamp, rand, type Pt } from './util';
+import { TAU, clamp, rand, retain, type Pt } from './util';
 
 export const HORIZON_R = 48;
 const RIFT_WARN = 1.15;
@@ -63,7 +63,7 @@ function updateJellies(dt: number, playing: boolean) {
     if (j.x > view.W + 60) j.x = -60;
     if (playing && sweptDist(j) < j.r * 0.8 + pr) damagePlayer('a reef jelly');
   }
-  G.jellies = G.jellies.filter((j) => !j.dead);
+  retain(G.jellies, (j) => !j.dead);
 }
 
 export function popJelly(j: Jelly) {
@@ -124,7 +124,7 @@ function updateRifts(dt: number, playing: boolean) {
       damageBoss(10, G.boss.x, G.boss.y, true);
     }
   }
-  G.rifts = G.rifts.filter((r) => r.t < RIFT_WARN + RIFT_TEAR + 0.3);
+  retain(G.rifts, (r) => r.t < RIFT_WARN + RIFT_TEAR + 0.3);
 }
 
 // ---------- Event Horizon ----------
@@ -141,7 +141,7 @@ function updateGravity(dt: number, playing: boolean) {
     e.vy += (dy / d) * f;
     if (d < HORIZON_R + e.r * 0.3) killEnemy(e, 0);
   }
-  G.sparks = G.sparks.filter((s) => {
+  retain(G.sparks, (s) => {
     const dx = c.x - s.x;
     const dy = c.y - s.y;
     const d = Math.hypot(dx, dy) || 1;
@@ -200,7 +200,9 @@ function drawJelly(c: CanvasRenderingContext2D, j: Jelly) {
   c.strokeStyle = `hsla(${j.hue}, 100%, 82%, 0.85)`;
   c.lineWidth = 1.5;
   c.stroke();
+  glowLayer('front');  // the nucleus shines through the bell instead of sitting under it
   drawGlow(c, j.x, j.y - j.r * 0.35, j.r * 0.5, j.hue + 20, 85, 0.8);
+  glowLayer('back');
 }
 
 function accretion(c: CanvasRenderingContext2D, front: boolean) {

@@ -15,7 +15,8 @@ export type EventKind = 'starfall' | 'bloodmoon' | 'goldrush' | 'eclipse' | 'sto
 export const WARP_TIME = 3;
 
 export interface TimedPt extends Pt { t: number }
-export interface Dust { x: number; y: number; vx: number; vy: number; z: number }
+/** `band` (0 far .. 2 near) is fixed from `z` at creation so drawing can batch by it. */
+export interface Dust { x: number; y: number; vx: number; vy: number; z: number; band: number }
 export interface Particle {
   x: number; y: number; vx: number; vy: number; life: number; maxLife: number; size: number; hue: number;
   kind: 'glow' | 'streak' | 'shard'; rot: number; spin: number;
@@ -163,7 +164,8 @@ export interface Game {
   forgeFrom: 'title' | 'dead';
 }
 
-export const view = { W: 0, H: 0 };
+/** CSS size of the screen; `scale` is the adaptive render scale of the world and post passes (1 = full). */
+export const view = { W: 0, H: 0, scale: 1 };
 /** `touch` is true once the player steers with a finger (or on a touch-first device), for the on-screen hints. */
 export const pointer = { x: 0, y: 0, moved: false, touch: false };
 /** `px, py` is where the wisp was last frame: hits are tested along the whole stretch it covered. */

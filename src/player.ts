@@ -98,7 +98,10 @@ export function seedDust() {
   const { W, H } = view;
   G.dust = [];
   const n = Math.floor((W * H) / 1700);
-  for (let i = 0; i < n; i++) G.dust.push({ x: rand(0, W), y: rand(0, H), vx: 0, vy: 0, z: Math.random() * Math.random() });
+  for (let i = 0; i < n; i++) {
+    const z = Math.random() * Math.random();
+    G.dust.push({ x: rand(0, W), y: rand(0, H), vx: 0, vy: 0, z, band: Math.min(2, Math.floor(z * 3)) });
+  }
 }
 
 export function updateDust(dt: number) {
